@@ -24,8 +24,17 @@ def sample_bytes() -> bytes:
     return PUBLIC_SAMPLE_PDF.read_bytes()
 
 
-# --- Local-only real-world fixture (sensitive, not in git) ---------------
+# --- Local-only real-world fixtures (sensitive, not in git) ---------------
+# Two local-only pools, both gitignored (see .gitignore `*.pdf` rule — no
+# `!` exception for these). Tests using them auto-skip when absent so the
+# committed suite stays green on clones without the sensitive samples.
+
 R4151_PDF = FIXTURES / "R4.15.1-outbound-config.pdf"
+
+# 7 vendor log/syslog manuals — the real target corpus for this project.
+# Lives in fixtures_private/ (gitignored). Used by the issue #3+ regression
+# suite; issue #3's AC2 calls for "6 份安全厂商 fixture".
+PRIVATE_FIXTURES = pathlib.Path(__file__).parent / "fixtures_private"
 
 
 def _r4151_available() -> bool:
@@ -49,3 +58,23 @@ def r4151_bytes() -> bytes:
     if not _r4151_available():
         pytest.skip("R4.15.1 fixture not present (local-only sensitive sample)")
     return R4151_PDF.read_bytes()
+
+
+def _vendor_pdfs() -> list[pathlib.Path]:
+    """All local-only vendor fixture PDFs (sorted, stable order)."""
+    if not PRIVATE_FIXTURES.exists():
+        return []
+    return sorted(PRIVATE_FIXTURES.glob("*.pdf"))
+
+
+@pytest.fixture
+def vendor_pdfs() -> list[str]:
+    """Absolute paths to the local-only vendor fixtures (7 security-vendor manuals).
+
+    Skipped when none are present. Used by the multi-vendor regression suite
+    (issue #3+ AC2: "6 份安全厂商 fixture"); one extra is tolerated.
+    """
+    paths = _vendor_pdfs()
+    if not paths:
+        pytest.skip("vendor fixtures not present (local-only sensitive samples)")
+    return [str(p) for p in paths]

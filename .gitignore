@@ -23,6 +23,8 @@ Thumbs.db
 # Test files
 *.pdf
 !tests/fixtures/*.pdf
+# pdf2md_full fixtures are local-only (may include sensitive samples);
+# leave them ignored by the *.pdf rule above.
 
 # Build cache
 **/*.rs.bk
@@ -42,3 +44,9 @@ test_output/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# pdf2md-full working artifacts
+.codegraph/
+.scratch/
+outputs/
+run_pdf2md.py

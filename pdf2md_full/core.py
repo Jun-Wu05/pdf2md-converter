@@ -1,13 +1,14 @@
 """Core implementation of the pdf2md_full post-processing layer.
 
-Issue #4 — wireframe-free field-table reconstruction.
+Issues #4 + #6 — wireframe-free field-table reconstruction, incl. multi-row
+(vertical-per-char) header merge.
 
 ``convert_pdf_to_markdown`` returns the pdf-inspector body Markdown **plus** a
 ``## 表格还原`` section: rebuilt Markdown tables derived from the structured
 ``TextItem`` coordinates (see :mod:`pdf2md_full.tables`). The body itself is
-still sourced from ``pdf_inspector.process_pdf`` — #4 only *appends* rebuilt
-tables, it does not rewrite the body, so the 98% text-completeness contract
-inherited from #2 is preserved.
+still sourced from ``pdf_inspector.process_pdf`` — these slices only *append*
+rebuilt tables, they do not rewrite the body, so the 98% text-completeness
+contract inherited from #2 is preserved.
 
 The public entry signature and the text-completeness guarantee are the public
 contract; downstream slices swap the body source and insert table-restoration

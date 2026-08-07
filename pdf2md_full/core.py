@@ -1,20 +1,13 @@
 """Core implementation of the pdf2md_full post-processing layer.
 
-Issue #3 — structured intake slice.
+Issue #4 — wireframe-free field-table reconstruction.
 
-``convert_pdf_to_markdown`` now captures structured ``TextItem`` data via
-``pdf_inspector.extract_text_with_positions`` and threads it through an
-internal :class:`_Extraction` pipeline object, so downstream slices (#4 row/
-column alignment and beyond) can consume coordinates + font metadata without
-re-extraction.
-
-The body Markdown is **still sourced from** ``pdf_inspector.process_pdf`` in
-this slice. A naive Python coordinate rebuild was probed against the 7 vendor
-fixtures and fell under 98% on 3 of them (科来 0.939, ImmunityOne 0.971,
-微步 0.972); the missing length is column detection + cross-page merge, which
-is the #4 slice's job. Rebuilding it here would silently absorb #4's work, so
-the body stays on ``process_pdf`` and the 98% completeness contract inherited
-from #2 is preserved unchanged.
+``convert_pdf_to_markdown`` returns the pdf-inspector body Markdown **plus** a
+``## 表格还原`` section: rebuilt Markdown tables derived from the structured
+``TextItem`` coordinates (see :mod:`pdf2md_full.tables`). The body itself is
+still sourced from ``pdf_inspector.process_pdf`` — #4 only *appends* rebuilt
+tables, it does not rewrite the body, so the 98% text-completeness contract
+inherited from #2 is preserved.
 
 The public entry signature and the text-completeness guarantee are the public
 contract; downstream slices swap the body source and insert table-restoration
@@ -27,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pdf_inspector
+
+from .tables import rebuild_field_tables
 
 
 @dataclass
@@ -45,15 +40,13 @@ class _Extraction:
 def convert_pdf_to_markdown(pdf_path: str) -> str:
     """Convert a PDF file at ``pdf_path`` into Markdown.
 
-    Returns the Markdown string. For scanned/image-based PDFs the result may
-    be empty (whatever pdf-inspector produced) but is never an exception.
-
-    Structured :class:`TextItem` data is captured into the internal pipeline
-    for downstream table-restoration slices; the body text itself still comes
-    from ``pdf_inspector.process_pdf`` in this slice.
+    Returns the pdf-inspector body Markdown followed by a ``## 表格还原``
+    section holding wireframe-free field tables rebuilt from ``TextItem``
+    coordinates. For scanned/image-based PDFs the body may be empty but the
+    call is never an exception.
     """
     extraction = _convert(pdf_path)
-    return extraction.markdown
+    return _assemble(extraction)
 
 
 def convert_pdf_to_markdown_bytes(data: bytes) -> str:
@@ -61,12 +54,12 @@ def convert_pdf_to_markdown_bytes(data: bytes) -> str:
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError("data must be bytes")
     extraction = _convert_bytes(bytes(data))
-    return extraction.markdown
+    return _assemble(extraction)
 
 
 # --- Internal pipeline ---------------------------------------------------
 
-# Structured-intake seam: downstream slices (#4+) import this to obtain the
+# Structured-intake seam: downstream slices (#5+) import this to obtain the
 # TextItem list without re-running extraction. Named with a leading underscore
 # because it is an internal seam, not part of the public API.
 
@@ -87,6 +80,20 @@ def _convert_bytes(data: bytes) -> _Extraction:
     text_items = pdf_inspector.extract_text_with_positions_bytes(data)
     markdown = pdf_inspector.process_pdf_bytes(data).markdown or ""
     return _Extraction(markdown=markdown, text_items=text_items)
+
+
+def _assemble(extraction: _Extraction) -> str:
+    """Body Markdown + rebuilt field-table section (appended, never rewritten)."""
+    body = extraction.markdown
+    tables = rebuild_field_tables(extraction.text_items)
+    if not tables:
+        return body
+    section = "## 表格还原\n\n" + "\n\n".join(tables)
+    if not body:
+        return section
+    if body.endswith("\n"):
+        return body + "\n" + section
+    return body + "\n\n" + section
 
 
 def _validate_path(pdf_path: str) -> None:

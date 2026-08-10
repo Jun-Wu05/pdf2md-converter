@@ -28,6 +28,8 @@ that spans a page break is only rebuilt up to the page boundary here.
 """
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any
 
 _Y_TOL = 3.0
@@ -37,6 +39,9 @@ _GAP_THRESHOLD = 40.0
 # column. Column centres are derived from the data-item x histogram, so this
 # only needs to absorb per-item x jitter, not separate columns.
 _X_COL_TOL = 18.0
+
+# A markdown table separator cell (``---`` / ``:--:``).
+_SEP_CELL = re.compile(r"^:?-+:?$")
 
 
 # --- physical-row clustering (#4) ------------------------------------------
@@ -176,11 +181,18 @@ def _collect_table_rows(
     return table, j
 
 
-def _render_table(table: list[list[Any]]) -> str:
+def _render_table(table: list[list[Any]]) -> tuple[str, list[float]]:
+    """Render a single-row-header table; return (markdown, header x-fingerprint).
+
+    The x-fingerprint is the sorted list of header items' x coordinates — the
+    per-column grid used by #7 to decide whether the next page's table is a
+    continuation (same header text AND same column grid) or an independent
+    table that just re-uses the same header words at a different x.
+    """
     header = table[0]
     data_rows = table[1:]
     if not data_rows:
-        return ""
+        return "", []
     # Column count comes from the DATA rows' x spread, not the header item
     # count: vertical-per-char headers (#6) and right-aligned headers (#4)
     # would otherwise force the wrong column count.
@@ -204,7 +216,8 @@ def _render_table(table: list[list[Any]]) -> str:
     lines.append("|" + "|".join("---" for _ in range(k)) + "|")
     for r in data_rows:
         lines.append("| " + " | ".join(to_cells(r)) + " |")
-    return "\n".join(lines)
+    header_xs = sorted(it.x for it in header)
+    return "\n".join(lines), header_xs
 
 
 # --- column inference ------------------------------------------------------
@@ -234,8 +247,11 @@ def _infer_column_count(data_rows: list[list[Any]]) -> int:
 
 def _column_first_table(
     rows: list[tuple[int, list[Any]]], start: int
-) -> tuple[str, int]:
+) -> tuple[str, list[float], int]:
     """Rebuild a vertical-per-char field table starting at ``start``.
+
+    Returns ``(markdown, header_xs, next_index)`` where ``header_xs`` is the
+    sorted column-centre x list used by #7 to match cross-page continuations.
 
     1. Gather header fragment rows (contiguous physical rows above the first
        data row that carry 字段 / 名称 / 类型 tokens).
@@ -261,7 +277,7 @@ def _column_first_table(
             continue
         break
     if not header_rows:
-        return "", j
+        return "", [], j
     # Data rows.
     data_rows: list[list[Any]] = []
     prev_y = header_rows[-1][0].y
@@ -280,7 +296,7 @@ def _column_first_table(
         prev_y = r[0].y
         j += 1
     if not data_rows:
-        return "", j
+        return "", [], j
 
     all_items = [it for r in header_rows + data_rows for it in r]
     # Column count and centres come from clustering the DATA items' x
@@ -302,7 +318,10 @@ def _column_first_table(
     lines.append("|" + "|".join("---" for _ in range(k)) + "|")
     for r in data_cells:
         lines.append("| " + " | ".join(r) + " |")
-    return "\n".join(lines), j
+    # Header x-fingerprint for #7 continuation match: the column centres are
+    # the stable grid for vertical-per-char tables (header items span rows).
+    header_xs = sorted(centres)
+    return "\n".join(lines), header_xs, j
 
 
 def _is_header_fragment(row: list[Any], prior: list[list[Any]]) -> bool:
@@ -456,27 +475,147 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
     tables (#6) use the column-first path. The dispatch heuristic checks
     whether the rows following a field header seed still look like header
     fragments rather than data.
+
+    Cross-page continuation (#7): when a rebuilt table's header tokens AND
+    column x-grid match the previously emitted table, the continuation is a
+    re-emit of the same table on the next page — its data rows are appended
+    and its header dropped, so the merged output has a single header / |---|.
+    Tables with the same header text but a different column grid (e.g. §5.4's
+    indented optional-field table) stay independent.
     """
     rows = _cluster_rows(text_items)
-    tables: list[str] = []
+    built: list[_BuiltTable] = []
     i = 0
     while i < len(rows):
         if _is_field_header(rows[i][1]):
             # Peek: is this a vertical-per-char header (#6) or single-row (#4)?
             if _is_vertical_table(rows, i):
-                md, nxt = _column_first_table(rows, i)
+                md, header_xs, nxt = _column_first_table(rows, i)
                 if md:
-                    tables.append(md)
+                    built.append(_BuiltTable(md, header_xs, rows[i][0]))
                 i = max(nxt, i + 1)
             else:
                 table, nxt = _collect_table_rows(rows, i)
-                md = _render_table(table)
+                md, header_xs = _render_table(table)
                 if md:
-                    tables.append(md)
+                    built.append(_BuiltTable(md, header_xs, rows[i][0]))
                 i = max(nxt, i + 1)
         else:
             i += 1
-    return tables
+    return _merge_continuations(built)
+
+
+@dataclass
+class _BuiltTable:
+    """One rebuilt field table plus the metadata #7 needs to merge it."""
+
+    markdown: str
+    header_xs: list[float]  # sorted header-column x grid (continuation match key)
+    page: int
+
+
+# Two header x-grids within this many points, column-for-column, count as the
+# same grid — absorbs per-item x jitter across pages without merging tables
+# whose columns are genuinely at different x positions (e.g. an indented
+# optional-field table shifted ~40pt right vs the main table).
+_GRID_TOL = 12.0
+
+
+def _merge_continuations(built: list[_BuiltTable]) -> list[str]:
+    """Fold cross-page continuation tables into their predecessor.
+
+    A table is a continuation of the previous one when (a) it starts on a
+    later page, (b) its header tokens equal the previous table's, and (c)
+    its header column x-grid matches column-for-column within ``_GRID_TOL``.
+    Condition (c) is the guardrail that keeps an independent table which
+    merely re-uses the same header words at a different indent from being
+    folded in. The continuation's data rows are appended after the previous
+    table's last data row; its header and ``|---|`` separator are dropped.
+    """
+    if not built:
+        return []
+    out: list[str] = [built[0].markdown]
+    last = built[0]
+    for t in built[1:]:
+        if t.page > last.page and _is_continuation(t, last):
+            out[-1] = _append_continuation(out[-1], t.markdown)
+            last = _BuiltTable(out[-1], last.header_xs, t.page)
+        else:
+            out.append(t.markdown)
+            last = t
+    return out
+
+
+def _header_tokens(md: str) -> list[str]:
+    """The first non-separator table row of ``md`` as a list of cell texts."""
+    for line in md.splitlines():
+        s = line.strip()
+        if s.startswith("|") and s.endswith("|") and len(s) >= 3:
+            cells = [c.strip() for c in s[1:-1].split("|")]
+            if not all(_SEP_CELL.match(c) for c in cells if c):
+                return cells
+    return []
+
+
+def _data_block(md: str) -> str:
+    """All table rows of ``md`` after the header + separator (the data rows)."""
+    lines = md.splitlines()
+    body: list[str] = []
+    seen_sep = False
+    for line in lines:
+        s = line.strip()
+        if not (s.startswith("|") and s.endswith("|") and len(s) >= 3):
+            continue
+        cells = [c.strip() for c in s[1:-1].split("|")]
+        if not seen_sep:
+            if all(_SEP_CELL.match(c) for c in cells if c):
+                seen_sep = True
+            continue
+        body.append(s)
+    return "\n".join(body)
+
+
+def _is_continuation(cur: _BuiltTable, prev: _BuiltTable) -> bool:
+    """Continuation when header tokens match AND column x-grids match."""
+    if _header_cells(_header_tokens(cur.markdown)) != _header_cells(
+        _header_tokens(prev.markdown)
+    ):
+        return False
+    return _grid_matches(cur.header_xs, prev.header_xs)
+
+
+def _grid_matches(a: list[float], b: list[float]) -> bool:
+    """Column-for-column x-grid equality within ``_GRID_TOL``.
+
+    Different column counts ⇒ not the same grid. Equal header text with a
+    different column count (a 4-col table vs a 3-col table) is also not a
+    continuation — the grids cannot line up.
+    """
+    if not a or not b or len(a) != len(b):
+        return False
+    return all(abs(x - y) <= _GRID_TOL for x, y in zip(a, b))
+
+
+def _header_cells(raw_header: list[str]) -> list[str]:
+    """Normalise a raw header cell list for continuation matching.
+
+    Drops trailing empty cells (the header row may be padded to the data
+    column count with empty trailing cells, e.g. ``字段名 | … | 是否必填 |``)
+    and strips inter-cell whitespace so ``字段名`` vs ``字段名 `` don't
+    break equality.
+    """
+    cells = [c.strip() for c in raw_header]
+    while cells and not cells[-1]:
+        cells.pop()
+    return cells
+
+
+def _append_continuation(prev_md: str, cont_md: str) -> str:
+    """Append ``cont_md``'s data rows to ``prev_md``, dropping the cont. header."""
+    body = _data_block(cont_md)
+    if not body:
+        return prev_md
+    return prev_md + "\n" + body
 
 
 def _is_vertical_table(

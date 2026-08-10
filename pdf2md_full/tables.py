@@ -1,27 +1,29 @@
 """Wireframe-free field-table reconstruction from structured TextItems.
 
-Issue #4 — row cluster & column alignment slice.
+Issues #4 + #6 — row cluster, column alignment, and multi-row header merge.
 
 A *field table* (字段表) is the security-vendor convention of listing log
-fields as ``字段 | 字段名称 | 说明`` (or 4-column variants) with **no ruling
+fields as ``字段 | 字段名称 | 说明`` (or 4–5-column variants) with **no ruling
 lines** — pdf-inspector's rect/line table detectors cannot see it, so the
 body Markdown comes out garbled. This module rebuilds such tables from
-``TextItem`` coordinates:
+``TextItem`` coordinates.
 
-1. cluster items into rows by ``page + y`` (within ``_Y_TOL``);
-2. detect a field-table header row (an item containing ``字段``);
-3. on the same page, collect following data rows (≥2 items) until a y-gap
-   or the next header;
-4. derive column boundaries from the **X-coordinate histogram valleys** of
-   the data items (not the header x-starts — the 说明 header is often
-   right-aligned while its data starts further left, so header-x alignment
-   would drift);
-5. assign each data item to a column by x, preserving empty cells (no
-   left-shift), and render a standard Markdown table with a ``|---|``
-   separator row.
+Two layout sub-types are handled:
 
-Scope: single page, single-row header, uneven column widths. Multi-row
-headers (#6) and cross-page continuation (#7) are deferred — a field table
+1. **Single-row header, uneven widths** (#4, e.g. R4.15.1 / 微步 / SecIPS):
+   the header sits on one y; data rows follow at a regular y-spacing. Columns
+   are derived from the X-histogram valleys of the data items.
+
+2. **Vertical-per-char header & cells** (#6, e.g. syslog日志对接): the header
+   *and* each data cell's Chinese text are split into vertically stacked
+   fragments whose y-ranges overlap with neighbouring data rows. A single
+   y-gap threshold cannot separate "wrap continuation" from "new data row"
+   (微步's 15.6pt row spacing overlaps syslog's 7–15pt vertical-fragment
+   gaps), so clustering is **column-first**: items are bucketed by X into
+   columns, fragments within a column are merged by y, and data-row
+   boundaries are anchored on the leftmost (field-name) column.
+
+Scope: single page. Cross-page continuation (#7) is deferred — a field table
 that spans a page break is only rebuilt up to the page boundary here.
 """
 from __future__ import annotations
@@ -31,9 +33,13 @@ from typing import Any
 _Y_TOL = 3.0
 # A y-gap larger than this ends a table (normal row spacing is ~18–32pt).
 _GAP_THRESHOLD = 40.0
+# Items whose x-centres fall within this many points are treated as the same
+# column. Column centres are derived from the data-item x histogram, so this
+# only needs to absorb per-item x jitter, not separate columns.
+_X_COL_TOL = 18.0
 
 
-# --- row clustering --------------------------------------------------------
+# --- physical-row clustering (#4) ------------------------------------------
 
 
 def _cluster_rows(items: list[Any]) -> list[tuple[int, list[Any]]]:
@@ -68,7 +74,7 @@ def _is_field_header(row: list[Any]) -> bool:
     return any("字段" in it.text for it in row)
 
 
-# --- column boundaries from X-histogram valleys ----------------------------
+# --- column boundaries from X-histogram valleys (#4) -----------------------
 
 
 def _column_boundaries(data_xs: list[float], k: int) -> list[float]:
@@ -83,7 +89,6 @@ def _column_boundaries(data_xs: list[float], k: int) -> list[float]:
     xs = sorted(data_xs)
     if len(xs) == 1:
         return []
-    # gaps between consecutive sorted x values
     gaps = sorted(
         range(len(xs) - 1),
         key=lambda i: xs[i + 1] - xs[i],
@@ -104,7 +109,40 @@ def _assign_column(x: float, boundaries: list[float]) -> int:
     return col
 
 
-# --- table extraction ------------------------------------------------------
+def _cluster_x_centres(xs: list[float]) -> list[float]:
+    """Cluster x coordinates into column centres by merging values within
+    ``_X_COL_TOL`` — the data-driven column grid for vertical-per-char
+    tables (#6). Clusters are sorted ascending; each cluster's centre is the
+    mean of its members."""
+    if not xs:
+        return []
+    vals = sorted(xs)
+    clusters: list[list[float]] = [[vals[0]]]
+    for v in vals[1:]:
+        if v - clusters[-1][-1] <= _X_COL_TOL:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    return [sum(c) / len(c) for c in clusters]
+
+
+def _nearest_column(x: float, centres: list[float], tol: float = _X_COL_TOL) -> int:
+    """Assign ``x`` to the nearest column centre, falling back to the nearest
+    column when no centre is within ``tol`` (preserves far-right 示例 columns
+    whose centre sits beyond the data x range)."""
+    best, bestd = 0, float("inf")
+    for i, c in enumerate(centres):
+        d = abs(x - c)
+        if d < bestd:
+            bestd, best = d, i
+    return best
+
+
+def _assign_column_centres(x: float, centres: list[float]) -> int:
+    return _nearest_column(x, centres)
+
+
+# --- table extraction (#4 path: single-row header) ------------------------
 
 
 def _collect_table_rows(
@@ -113,9 +151,9 @@ def _collect_table_rows(
     """Collect header + data rows for one table starting at ``start``.
 
     Returns the table rows (header first) and the index just past the table.
-    Data rows must have ≥2 items (single-item lines are continuation text,
-    handled by #6/#7) and sit within ``_GAP_THRESHOLD`` of the previous
-    accepted row, on the same page as the header.
+    Data rows must have ≥2 items (single-item lines are continuation text)
+    and sit within ``_GAP_THRESHOLD`` of the previous accepted row, on the
+    same page as the header.
     """
     page, header = rows[start]
     table = [header]
@@ -125,11 +163,11 @@ def _collect_table_rows(
         p, r = rows[j]
         if p != page:
             break
+        if _is_field_header(r):
+            break
         if len(r) < 2:
             j += 1
             continue
-        if _is_field_header(r):
-            break
         if abs(r[0].y - prev_y) > _GAP_THRESHOLD:
             break
         table.append(r)
@@ -140,16 +178,21 @@ def _collect_table_rows(
 
 def _render_table(table: list[list[Any]]) -> str:
     header = table[0]
-    k = len(header)
     data_rows = table[1:]
     if not data_rows:
         return ""
+    # Column count comes from the DATA rows' x spread, not the header item
+    # count: vertical-per-char headers (#6) and right-aligned headers (#4)
+    # would otherwise force the wrong column count.
+    k = _infer_column_count(data_rows)
+    if k < 2:
+        k = max(2, len(header))
     data_xs = [it.x for r in data_rows for it in r]
     boundaries = _column_boundaries(data_xs, k)
 
     def to_cells(r: list[Any]) -> list[str]:
         cells = [""] * k
-        for it in r:
+        for it in sorted(r, key=lambda i: (i.x, -i.y)):
             c = _assign_column(it.x, boundaries)
             if c >= k:
                 c = k - 1
@@ -164,6 +207,241 @@ def _render_table(table: list[list[Any]]) -> str:
     return "\n".join(lines)
 
 
+# --- column inference ------------------------------------------------------
+
+
+def _infer_column_count(data_rows: list[list[Any]]) -> int:
+    """Estimate the column count from data-row item counts and x clusters.
+
+    Most data rows carry one item per column, so the modal item count is a
+    strong signal. A few rows wrap (fewer items) or split a cell (more), so
+    the mode is taken over rows with ≥2 items; ties round up to favour the
+    wider table (avoids collapsing a 5-column table to the 2-item wrap row).
+    """
+    counts = [len(r) for r in data_rows if len(r) >= 2]
+    if not counts:
+        return 0
+    from collections import Counter
+
+    freq = Counter(counts)
+    best = max(freq.values())
+    candidates = sorted(c for c, n in freq.items() if n == best)
+    return candidates[-1]
+
+
+# --- column-first rebuild (#6: vertical-per-char) --------------------------
+
+
+def _column_first_table(
+    rows: list[tuple[int, list[Any]]], start: int
+) -> tuple[str, int]:
+    """Rebuild a vertical-per-char field table starting at ``start``.
+
+    1. Gather header fragment rows (contiguous physical rows above the first
+       data row that carry 字段 / 名称 / 类型 tokens).
+    2. Gather data rows: rows on the same page within ``_GAP_THRESHOLD``,
+       stopping at the next field header or a large y-gap.
+    3. Derive column centres from the data items' x clusters.
+    4. Within each column, merge vertical fragments by y into cells, anchored
+       on the leftmost column's y to delimit data rows.
+    """
+    page = rows[start][0]
+    # Header fragments: walk forward while rows look like header fragments.
+    header_rows: list[list[Any]] = []
+    j = start
+    while j < len(rows) and rows[j][0] == page:
+        r = rows[j][1]
+        if j == start:
+            header_rows.append(r)
+            j += 1
+            continue
+        if _is_header_fragment(r, header_rows):
+            header_rows.append(r)
+            j += 1
+            continue
+        break
+    if not header_rows:
+        return "", j
+    # Data rows.
+    data_rows: list[list[Any]] = []
+    prev_y = header_rows[-1][0].y
+    while j < len(rows):
+        p, r = rows[j]
+        if p != page:
+            break
+        if _is_field_header(r):
+            break
+        if len(r) < 1:
+            j += 1
+            continue
+        if abs(r[0].y - prev_y) > _GAP_THRESHOLD:
+            break
+        data_rows.append(r)
+        prev_y = r[0].y
+        j += 1
+    if not data_rows:
+        return "", j
+
+    all_items = [it for r in header_rows + data_rows for it in r]
+    # Column count and centres come from clustering the DATA items' x
+    # coordinates — vertical-per-char headers split tokens across rows, so
+    # the per-row item count is unreliable; the x grid is stable.
+    data_items = [it for r in data_rows for it in r]
+    centres = _cluster_x_centres([it.x for it in data_items])
+    k = len(centres)
+    if k < 2:
+        centres = _cluster_x_centres([it.x for it in all_items])
+        k = max(2, len(centres))
+    header_cells = _header_cells_column_first(header_rows, centres, k)
+    data_cells = _rows_column_first(data_rows, centres, k)
+
+    # Flatten multi-row header fragments into a single header row.
+    header_line = _merge_header(header_cells, k)
+
+    lines = ["| " + " | ".join(header_line) + " |"]
+    lines.append("|" + "|".join("---" for _ in range(k)) + "|")
+    for r in data_cells:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines), j
+
+
+def _is_header_fragment(row: list[Any], prior: list[list[Any]]) -> bool:
+    """A header-fragment row: short (≤3 items), and either carries a 字段
+    token or a 名称/类型/说明/示例 token when a 字段 header was already
+    seen. Whitespace inside a token is ignored so vertically-split ``字 段``
+    fragments match ``字段``."""
+    if len(row) > 3 or not row:
+        return False
+    texts = {it.text for it in row}
+    norm = {t.replace(" ", "").replace("　", "") for t in texts}
+    if any("字段" in t for t in norm):
+        return True
+    if prior and any("字段" in it.text.replace(" ", "") for r in prior for it in r):
+        return any(t in texts or t in norm for t in
+                   ("名称", "类型", "说明", "示例", "名", "类", "段", "字", "称", "型", "说", "明", "示", "例"))
+    return False
+
+
+def _row_cells_column_first(
+    rows: list[list[Any]],
+    centres: list[float],
+    k: int,
+    anchor_first: bool,
+) -> list[str]:
+    """Collapse a band of physical rows into one cell-row, merging vertical
+    fragments within each column top→bottom."""
+    cells = [""] * k
+    items = sorted(
+        [it for r in rows for it in r], key=lambda i: (i.x, -i.y)
+    )
+    for it in items:
+        c = _assign_column_centres(it.x, centres)
+        if c >= k:
+            c = k - 1
+        cells[c] = (cells[c] + it.text) if cells[c] else it.text
+    return cells
+
+
+def _header_cells_column_first(
+    rows: list[list[Any]],
+    centres: list[float],
+    k: int,
+) -> list[list[str]]:
+    """Bucket header fragment items by nearest column centre, merging
+    fragments within a column top→bottom. Returns one cell-row per physical
+    fragment row (caller flattens)."""
+    out: list[list[str]] = []
+    for r in rows:
+        cells = [""] * k
+        for it in sorted(r, key=lambda i: (i.x, -i.y)):
+            c = _assign_column_centres(it.x, centres)
+            if c >= k:
+                c = k - 1
+            cells[c] = (cells[c] + it.text) if cells[c] else it.text
+        out.append(cells)
+    return out
+
+
+def _rows_column_first(
+    data_rows: list[list[Any]],
+    centres: list[float],
+    k: int,
+) -> list[list[str]]:
+    """Group physical data rows into logical data rows, anchored on the
+    leftmost column's y to delimit rows (so vertical fragments of one data
+    row are never merged with the next)."""
+    if not data_rows:
+        return []
+    # Bucket every item by column.
+    col_items: list[list[Any]] = [[] for _ in range(k)]
+    for r in data_rows:
+        for it in r:
+            c = _assign_column_centres(it.x, centres)
+            if c >= k:
+                c = k - 1
+            col_items[c].append(it)
+    for c in range(k):
+        col_items[c].sort(key=lambda i: (-i.y, i.x))
+
+    # Anchor rows on column 0 (the field-name column). Each col-0 item starts
+    # a new logical row; other columns' items attach to the row whose y-band
+    # contains them.
+    anchors = sorted(col_items[0], key=lambda i: -i.y) if col_items[0] else []
+    if not anchors:
+        # Degenerate: no leftmost items — fall back to one row per physical row.
+        return [_row_cells_column_first([r], centres, k, anchor_first=False) for r in data_rows]
+
+    row_ys = [a.y for a in anchors]
+    bands = _y_bands(row_ys)
+
+    def row_of(y: float) -> int:
+        for idx, (lo, hi) in enumerate(bands):
+            if lo <= y <= hi:
+                return idx
+        # Above the top anchor → first row; below the bottom → last row.
+        if y > row_ys[0]:
+            return 0
+        return len(row_ys) - 1
+
+    out = [[""] * k for _ in anchors]
+    # Place anchor column items.
+    for i, a in enumerate(anchors):
+        out[i][0] = a.text
+    # Place every other column's items into the matching row, merging
+    # vertical fragments within the row top→bottom.
+    for c in range(1, k):
+        for it in col_items[c]:
+            ri = row_of(it.y)
+            out[ri][c] = (out[ri][c] + it.text) if out[ri][c] else it.text
+    return out
+
+
+def _y_bands(ys: list[float]) -> list[tuple[float, float]]:
+    """Partition the y-axis into one band per anchor: each band spans from
+    the midpoint with the row above to the midpoint with the row below."""
+    bands: list[tuple[float, float]] = []
+    for i, y in enumerate(ys):
+        lo = (y + ys[i + 1]) / 2 if i + 1 < len(ys) else y - _GAP_THRESHOLD
+        hi = (y + ys[i - 1]) / 2 if i > 0 else y + _GAP_THRESHOLD
+        # ys are sorted descending, so hi (toward previous/above) > lo.
+        bands.append((lo, hi))
+    return bands
+
+
+def _merge_header(header_cells: list[list[str]], k: int) -> list[str]:
+    """Flatten header fragment cells into a single header row.
+
+    Vertical-per-char headers stack tokens across fragments (e.g. 字段 / 名称
+    / 类型). Concatenate per-column, keeping the first non-empty token of
+    each column and appending the rest without spaces for CJK runs."""
+    merged = [""] * k
+    for cells in header_cells:
+        for c in range(k):
+            if c < len(cells) and cells[c]:
+                merged[c] = (merged[c] + cells[c]) if merged[c] else cells[c]
+    return merged
+
+
 # --- public seam -----------------------------------------------------------
 
 
@@ -173,17 +451,55 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
     Returns one Markdown table per detected field-table region (header +
     data), in reading order. Empty list when no field tables are found
     (e.g. the public nexo fixture has none).
+
+    Single-row-header tables (#4) use the y-clustered path; vertical-per-char
+    tables (#6) use the column-first path. The dispatch heuristic checks
+    whether the rows following a field header seed still look like header
+    fragments rather than data.
     """
     rows = _cluster_rows(text_items)
     tables: list[str] = []
     i = 0
     while i < len(rows):
         if _is_field_header(rows[i][1]):
-            table, nxt = _collect_table_rows(rows, i)
-            md = _render_table(table)
-            if md:
-                tables.append(md)
-            i = max(nxt, i + 1)
+            # Peek: is this a vertical-per-char header (#6) or single-row (#4)?
+            if _is_vertical_table(rows, i):
+                md, nxt = _column_first_table(rows, i)
+                if md:
+                    tables.append(md)
+                i = max(nxt, i + 1)
+            else:
+                table, nxt = _collect_table_rows(rows, i)
+                md = _render_table(table)
+                if md:
+                    tables.append(md)
+                i = max(nxt, i + 1)
         else:
             i += 1
     return tables
+
+
+def _is_vertical_table(
+    rows: list[tuple[int, list[Any]]], start: int
+) -> bool:
+    """Dispatch heuristic: a field header at ``start`` is a vertical-per-char
+    table (#6) when the seed row carries the ``字段`` token in **two or more
+    distinct x columns** — the signature of a vertically-stacked multi-column
+    header (``字段 | 字段`` laid out as ``字段名称`` / ``字段类型``). A
+    single ``字段`` token (e.g. ``英文字段 | 说明``) is a regular #4 table
+    whose header happens to wrap, so it stays on the single-row path."""
+    seed = rows[start][1]
+    field_xs = sorted({it.x for it in seed if "字段" in it.text})
+    if len(field_xs) < 2:
+        return False
+    page = rows[start][0]
+    j = start + 1
+    fragment_count = 1
+    while j < len(rows) and rows[j][0] == page:
+        r = rows[j][1]
+        if _is_header_fragment(r, [seed]):
+            fragment_count += 1
+            j += 1
+            continue
+        break
+    return fragment_count >= 2

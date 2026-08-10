@@ -22,6 +22,7 @@ from typing import Any
 
 import pdf_inspector
 
+from .garble import annotate_decode_garble
 from .tables import rebuild_field_tables
 
 
@@ -84,8 +85,14 @@ def _convert_bytes(data: bytes) -> _Extraction:
 
 
 def _assemble(extraction: _Extraction) -> str:
-    """Body Markdown + rebuilt field-table section (appended, never rewritten)."""
-    body = extraction.markdown
+    """Body Markdown + rebuilt field-table section (appended, never rewritten).
+
+    The body is annotated for decode-garble (#5) *before* the table section is
+    appended — garble lives in the pdf-inspector body, not in the rebuilt
+    tables. The rebuilt field-table section is structured output (clean
+    column-aligned cells) and is left as-is.
+    """
+    body = annotate_decode_garble(extraction.markdown)
     tables = rebuild_field_tables(extraction.text_items)
     if not tables:
         return body

@@ -271,3 +271,124 @@ def test_secips_single_row_header_not_regressed(vendor_pdfs):
     devid = [r for r in _data_rows(target) if r and r[0] == "devid"][0]
     assert len(devid) == 3, f"devid row should stay 3 columns: {devid}"
     assert devid[1] == "int" and devid[2] == "设备id", f"devid drifted: {devid}"
+
+
+# --- Issue #7: cross-page continuation table merge & header dedup ----------
+#
+# R4.15.1 §5.3 is a 4-column field table (字段名 | 中文名称 | 字段类型 | 是否必填)
+# that spans page 6 → 7 → 8. Each continuation page re-emits the same header
+# row at the *same* column x coordinates (84.5 / 229.6 / 379.5 / 501.9), so #4's
+# per-page rebuild produces three separate tables that each re-emit the header.
+# #7 merges continuation pages whose header tokens AND column x grid match the
+# previous table into one table with a single header / |---| separator.
+#
+# AC1: the §5.3 table header appears exactly once in the output (one |---|).
+# AC2: continuation rows stay continuous — the last page's rows (uuid,
+#      triageResult) appear in the same merged table as the first page's rows
+#      (seq, name), no half-row truncation.
+# AC3: §5.4 (page 8 foot → page 9) re-uses the *same* header text but a
+#      *different* column x grid (40.7 / 114.4 / 236.8 / 359.1 — an indented
+#      optional-field table). It must NOT be merged into §5.3: it stays a
+#      separate table with its own header. Header-text equality alone would
+#      wrongly merge them, so the column-x-grid check is the guardrail.
+
+
+def _r4151_alert_tables(tables):
+    """All 4-col 字段名|中文名称|字段类型|是否必填 table fragments (pre- or post-merge)."""
+    out = []
+    for t in tables:
+        data = _data_rows(t)
+        if not data:
+            continue
+        h = data[0]
+        if (
+            len(h) >= 4
+            and h[0].startswith("字段名")
+            and "中文名称" in h[1]
+            and "字段类型" in h[2]
+            and "必填" in h[3]
+        ):
+            out.append(t)
+    return out
+
+
+def _r4151_s53_table(tables):
+    """The §5.3 continuation table: the alert table holding `seq` (page-6 head)."""
+    for t in _r4151_alert_tables(tables):
+        if any(r and r[0] == "seq" for r in _data_rows(t)):
+            return t
+    return None
+
+
+def test_r4151_cross_page_header_emitted_once(r4151_pdf):
+    """AC1: §5.3 header appears exactly once across the page-6/7/8 span.
+
+    Before #7 the same `字段名|中文名称|字段类型|是否必填` header is re-emitted
+    on each continuation page (3 times). After #7 the continuation pages are
+    merged into one table with a single header row and a single |---|.
+    """
+    md = convert_pdf_to_markdown(r4151_pdf)
+    tables = _parse_tables(_table_restore_section(md))
+    target = _r4151_s53_table(tables)
+    assert target is not None, "§5.3 alert field table (with `seq` row) not rebuilt"
+    headers = [
+        r for r in target
+        if not all(_SEP_CELL.match(c) for c in r) and r[0].startswith("字段名")
+    ]
+    assert len(headers) == 1, (
+        f"§5.3 header should appear once after merge, got {len(headers)}"
+    )
+    assert _has_separator(target), "no |---| separator on the merged §5.3 table"
+
+
+def test_r4151_cross_page_rows_continuous(r4151_pdf):
+    """AC2: continuation rows land in the same merged table, no truncation.
+
+    `seq`/`name` live on page 6; `uuid`/`triageResult` live on page 8. After
+    #7 they all appear in a single §5.3 table — the page-8 tail is not split
+    off into its own table with a re-emitted header.
+    """
+    md = convert_pdf_to_markdown(r4151_pdf)
+    tables = _parse_tables(_table_restore_section(md))
+    target = _r4151_s53_table(tables)
+    assert target is not None, "§5.3 alert field table not rebuilt"
+    rows = _data_rows(target)
+    field0 = [r[0] for r in rows if r]
+    assert "seq" in field0, "page-6 head row `seq` missing from merged table"
+    assert "name" in field0, "page-6 row `name` missing from merged table"
+    assert "uuid" in field0, "page-8 tail row `uuid` missing — half-row truncation"
+    assert "triageResult" in field0, (
+        "page-8 tail row `triageResult` missing — half-row truncation"
+    )
+    # Exactly one |---| separator ⇒ no re-emitted header mid-table.
+    seps = [r for r in target if all(_SEP_CELL.match(c) for c in r)]
+    assert len(seps) == 1, (
+        f"merged §5.3 should have one separator, got {len(seps)} — header re-emitted"
+    )
+
+
+def test_r4151_independent_table_not_merged(r4151_pdf):
+    """AC3: §5.4 (same header text, different column x grid) stays separate.
+
+    §5.4's optional-field table re-uses 字段名|中文名称|字段类型|是否必填 but sits
+    at a different x grid (page-8 foot, indented). Header-text equality alone
+    would merge it into §5.3; the column-x-grid guardrail keeps it distinct.
+    `attackerIp` is a §5.4-only row that must NOT appear inside the §5.3 table.
+    """
+    md = convert_pdf_to_markdown(r4151_pdf)
+    tables = _parse_tables(_table_restore_section(md))
+    target = _r4151_s53_table(tables)
+    assert target is not None, "§5.3 alert field table not rebuilt"
+    s53_field0 = [r[0] for r in _data_rows(target) if r]
+    assert "attackerIp" not in s53_field0, (
+        "§5.4 row `attackerIp` leaked into §5.3 — independent tables wrongly merged"
+    )
+    assert "victimIp" not in s53_field0, (
+        "§5.4 row `victimIp` leaked into §5.3 — independent tables wrongly merged"
+    )
+    # §5.4 still rebuilt as its own table somewhere in the output.
+    has_54 = any(
+        any(r and r[0] == "attackerIp" for r in _data_rows(t))
+        for t in tables
+    )
+    assert has_54, "§5.4 optional-field table was dropped (should stay separate)"

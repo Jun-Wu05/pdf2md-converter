@@ -23,8 +23,9 @@ Two layout sub-types are handled:
    columns, fragments within a column are merged by y, and data-row
    boundaries are anchored on the leftmost (field-name) column.
 
-Scope: single page. Cross-page continuation (#7) is deferred — a field table
-that spans a page break is only rebuilt up to the page boundary here.
+Scope: field tables are rebuilt on a page basis, with same-grid continuation
+pages merged by #7. When the single-row path has no unique modal column count,
+#8 emits a zero-loss definition list instead of inventing a Markdown grid.
 """
 from __future__ import annotations
 
@@ -231,7 +232,7 @@ def _infer_column_count(data_rows: list[list[Any]]) -> int:
     the mode is taken over rows with ≥2 items; ties round up to favour the
     wider table (avoids collapsing a 5-column table to the 2-item wrap row).
     """
-    counts = [len(r) for r in data_rows if len(r) >= 2]
+    counts = _data_row_item_counts(data_rows)
     if not counts:
         return 0
     from collections import Counter
@@ -240,6 +241,58 @@ def _infer_column_count(data_rows: list[list[Any]]) -> int:
     best = max(freq.values())
     candidates = sorted(c for c, n in freq.items() if n == best)
     return candidates[-1]
+
+
+def _data_row_item_counts(data_rows: list[list[Any]]) -> list[int]:
+    """Item counts for rows that can carry at least two table columns."""
+    return [len(r) for r in data_rows if len(r) >= 2]
+
+
+def _needs_degraded_representation(table: list[list[Any]]) -> bool:
+    """Return true only when this table has no stable column-count inference.
+
+    A unique modal data-row item count is the #4 path's primary confidence
+    signal. A tie between two or more equally common column counts means the
+    layout has no defensible two-dimensional interpretation: choosing either
+    count would necessarily combine or shift cells. This deliberately does
+    *not* flag occasional wrapped rows, empty cells, uneven widths, or #6's
+    column-first layouts.
+    """
+    data_rows = table[1:]
+    counts = _data_row_item_counts(data_rows)
+    if len(counts) < 2:
+        return True
+
+    from collections import Counter
+
+    frequencies = Counter(counts)
+    best = max(frequencies.values())
+    return sum(count == best for count in frequencies.values()) > 1
+
+
+def _render_degraded_definition_list(table: list[list[Any]]) -> str:
+    """Render a low-confidence table as zero-loss field definition entries.
+
+    Each data row keeps its TextItems in original x order. The first item is
+    the field key; subsequent cells are paired with the matching header label,
+    or a stable positional label when the row has more cells than the header.
+    Unlike a Markdown table, this representation never manufactures empty
+    cells or chooses a disputed column grid.
+    """
+    header = table[0]
+    labels = [it.text for it in header]
+    lines: list[str] = []
+    for row in table[1:]:
+        cells = [it.text for it in sorted(row, key=lambda it: it.x) if it.text]
+        if not cells:
+            continue
+        field = cells[0]
+        details = []
+        for index, value in enumerate(cells[1:], start=1):
+            label = labels[index] if index < len(labels) and labels[index] else f"列{index + 1}"
+            details.append(f"{label}: {value}")
+        lines.append(f"{field} — {'; '.join(details)}" if details else field)
+    return "\n".join(lines)
 
 
 # --- column-first rebuild (#6: vertical-per-char) --------------------------
@@ -482,6 +535,11 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
     and its header dropped, so the merged output has a single header / |---|.
     Tables with the same header text but a different column grid (e.g. §5.4's
     indented optional-field table) stay independent.
+
+    Degraded fallback (#8): a single-row table without a unique modal column
+    count is emitted as a definition list rather than a speculative Markdown
+    grid. The degraded table still participates in ordering but has no x-grid,
+    so it cannot be merged into a structured cross-page continuation.
     """
     rows = _cluster_rows(text_items)
     built: list[_BuiltTable] = []
@@ -496,9 +554,14 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
                 i = max(nxt, i + 1)
             else:
                 table, nxt = _collect_table_rows(rows, i)
-                md, header_xs = _render_table(table)
-                if md:
-                    built.append(_BuiltTable(md, header_xs, rows[i][0]))
+                if _needs_degraded_representation(table):
+                    md = _render_degraded_definition_list(table)
+                    if md:
+                        built.append(_BuiltTable(md, [], rows[i][0]))
+                else:
+                    md, header_xs = _render_table(table)
+                    if md:
+                        built.append(_BuiltTable(md, header_xs, rows[i][0]))
                 i = max(nxt, i + 1)
         else:
             i += 1

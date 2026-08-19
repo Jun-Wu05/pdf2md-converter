@@ -30,3 +30,4 @@ Documentation = "https://github.com/firecrawl/pdf-inspector/blob/main/docs/pytho
 
 [tool.maturin]
 features = ["python"]
+python-source = "."

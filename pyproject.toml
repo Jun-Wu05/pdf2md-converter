@@ -20,6 +20,9 @@ classifiers = [
     "Topic :: Text Processing",
 ]
 
+[project.scripts]
+pdf2md-full = "pdf2md_full.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/firecrawl/pdf-inspector"
 Repository = "https://github.com/firecrawl/pdf-inspector"

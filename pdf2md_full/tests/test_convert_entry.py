@@ -101,10 +101,14 @@ def test_text_completeness_vendor_fixtures(vendor_pdfs):
     """
     assert len(vendor_pdfs) >= 6, f"AC2 needs >=6 vendor fixtures, got {len(vendor_pdfs)}"
     under = []
+    empty = []
     for pdf_path in vendor_pdfs:
         baseline = pdf_inspector.process_pdf(pdf_path).markdown or ""
         converted = convert_pdf_to_markdown(pdf_path)
+        if not converted:
+            empty.append(pdf_path)
         ratio = len(converted) / len(baseline) if baseline else 1.0
         if ratio < 0.98:
             under.append((pdf_path, ratio))
+    assert not empty, f"empty output on: {empty}"
     assert not under, f"completeness < 98% on: {under}"

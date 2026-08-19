@@ -19,6 +19,8 @@ include = [
     # maturin derives the sdist file list from this allowlist; the stub must
     # ship so wheels built from the sdist keep their type hints.
     "/pdf_inspector.pyi",
+    # Ship the Python post-processing modules without local-only fixtures.
+    "/pdf2md_full/*.py",
 ]
 
 [lib]

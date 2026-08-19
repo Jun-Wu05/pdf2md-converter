@@ -39,6 +39,18 @@ pip install maturin
 maturin develop --release
 ```
 
+The full Python post-processing pipeline also installs the `pdf2md-full`
+command:
+
+```bash
+pdf2md-full document.pdf
+pdf2md-full document.pdf -o document.md
+```
+
+Without `-o`, Markdown is written to stdout. With `-o`, the output file is
+written as UTF-8. Conversion errors, including a missing input PDF, are
+reported on stderr and return a non-zero exit status.
+
 ## Usage
 
 ```python

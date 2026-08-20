@@ -8,9 +8,9 @@ use pdf_inspector::{
     detect_pdf_type, detect_vector_grid_in_region_mem, extract_pages_markdown,
     extract_pages_markdown_mem, extract_tables_in_regions_mem, extract_text,
     extract_text_in_regions_mem, extract_text_with_positions, extract_text_with_positions_mem,
-    process_pdf_mem, process_pdf_mem_with_options, process_pdf_with_options, to_markdown,
-    to_markdown_from_items_with_rects_and_page_count, MarkdownOptions, PdfError, PdfOptions,
-    PdfType, TextItem,
+    process_pdf_mem, process_pdf_mem_with_options, process_pdf_with_options,
+    process_pdf_with_positions_mem, to_markdown, to_markdown_from_items_with_rects_and_page_count,
+    MarkdownOptions, PdfError, PdfOptions, PdfType, TextItem,
 };
 use std::collections::HashSet;
 
@@ -527,9 +527,29 @@ fn test_digit_only_text_runs_are_preserved_in_markdown() {
     );
 }
 
-// ============================================================================
-// MarkdownOptions Tests
-// ============================================================================
+#[test]
+fn test_single_document_conversion_intake_matches_markdown_and_items() {
+    let pdf = make_minimal_text_pdf();
+    let intake = process_pdf_with_positions_mem(&pdf, PdfOptions::new())
+        .expect("combined conversion intake");
+    let markdown = intake.result.markdown.expect("markdown output");
+    assert!(markdown.contains("Hello World"));
+    assert!(intake
+        .text_items
+        .iter()
+        .any(|item| item.text.contains("Hello")));
+    let item = intake.text_items.first().expect("positioned text item");
+    assert!(item.x.is_finite());
+    assert!(item.y.is_finite());
+    assert!(item.width >= 0.0);
+    assert!(item.height >= 0.0);
+    assert_eq!(item.page, 1);
+}
+
+#[test]
+fn test_single_document_conversion_intake_rejects_invalid_pdf() {
+    assert!(process_pdf_with_positions_mem(b"not a PDF", PdfOptions::new()).is_err());
+}
 
 #[test]
 fn test_markdown_options_default() {

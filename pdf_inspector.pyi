@@ -2,6 +2,13 @@
 
 from typing import Optional
 
+class PdfIntake:
+    """Result of a conversion intake: processed-PDF result plus positioned text items."""
+    result: PdfResult
+    """The standard processed-PDF result (metadata + Markdown)."""
+    text_items: list[TextItem]
+    """Positioned text items consistent with the generated Markdown."""
+
 class PdfResult:
     """Result of processing a PDF file."""
     pdf_type: str
@@ -98,6 +105,16 @@ def process_pdf(path: str, pages: Optional[list[int]] = None) -> PdfResult:
 
 def process_pdf_bytes(data: bytes, pages: Optional[list[int]] = None) -> PdfResult:
     """Process a PDF from bytes in memory."""
+    ...
+
+def process_pdf_with_positions(path: str, pages: Optional[list[int]] = None) -> PdfIntake:
+    """Process a PDF into Markdown plus Markdown-consistent positioned text items
+    from a single loaded document."""
+    ...
+
+def process_pdf_with_positions_bytes(data: bytes, pages: Optional[list[int]] = None) -> PdfIntake:
+    """Process PDF bytes into Markdown plus Markdown-consistent positioned text
+    items from a single loaded document."""
     ...
 
 def detect_pdf(path: str) -> PdfResult:

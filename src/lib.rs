@@ -157,6 +157,18 @@ pub struct PdfProcessResult {
     pub has_encoding_issues: bool,
 }
 
+/// Result of a full conversion intake from one loaded PDF document.
+///
+/// `text_items` are the same Markdown-oriented items used by the processing
+/// pipeline after page-number and unreliable-text filtering.
+#[derive(Debug)]
+pub struct PdfConversionIntake {
+    /// The standard processing result, including Markdown and PDF metadata.
+    pub result: PdfProcessResult,
+    /// Positioned items consistent with the generated Markdown.
+    pub text_items: Vec<TextItem>,
+}
+
 // =========================================================================
 // Options builder
 // =========================================================================
@@ -291,6 +303,21 @@ pub fn process_pdf_with_options<P: AsRef<Path>>(
     let (doc, page_count) =
         load_document_from_path_with_password(&path, options.password.as_deref())?;
 
+    process_document(doc, page_count, options, start).map(|intake| intake.result)
+}
+
+/// Process a PDF file into Markdown and Markdown-consistent positioned text
+/// items from one loaded document.
+pub fn process_pdf_with_positions<P: AsRef<Path>>(
+    path: P,
+    options: PdfOptions,
+) -> Result<PdfConversionIntake, PdfError> {
+    let start = ProcessingTimer::start();
+    validate_pdf_file(&path)?;
+
+    let (doc, page_count) =
+        load_document_from_path_with_password(&path, options.password.as_deref())?;
+
     process_document(doc, page_count, options, start)
 }
 
@@ -311,6 +338,21 @@ pub fn process_pdf_mem_with_options(
     buffer: &[u8],
     options: PdfOptions,
 ) -> Result<PdfProcessResult, PdfError> {
+    let start = ProcessingTimer::start();
+    validate_pdf_bytes(buffer)?;
+
+    let (doc, page_count) =
+        load_document_from_mem_with_password(buffer, options.password.as_deref())?;
+
+    process_document(doc, page_count, options, start).map(|intake| intake.result)
+}
+
+/// Process a PDF from a memory buffer into Markdown and Markdown-consistent
+/// positioned text items from one loaded document.
+pub fn process_pdf_with_positions_mem(
+    buffer: &[u8],
+    options: PdfOptions,
+) -> Result<PdfConversionIntake, PdfError> {
     let start = ProcessingTimer::start();
     validate_pdf_bytes(buffer)?;
 
@@ -3595,7 +3637,7 @@ fn process_document(
     page_count: u32,
     options: PdfOptions,
     start: ProcessingTimer,
-) -> Result<PdfProcessResult, PdfError> {
+) -> Result<PdfConversionIntake, PdfError> {
     // Step 1 — Detection (cheap: scans content streams for text operators)
     let detection = detector::detect_from_document(&doc, page_count, &options.detection)?;
     let pdf_type = detection.pdf_type;
@@ -3606,33 +3648,39 @@ fn process_document(
 
     // DetectOnly → return immediately
     if options.mode == ProcessMode::DetectOnly {
-        return Ok(PdfProcessResult {
-            pdf_type,
-            markdown: None,
-            page_count,
-            processing_time_ms: start.elapsed_ms(),
-            pages_needing_ocr,
-            ocr_reasons_by_page: page_ocr_reasons_vec(detection_ocr_reasons),
-            title,
-            confidence,
-            layout: LayoutComplexity::default(),
-            has_encoding_issues: false,
+        return Ok(PdfConversionIntake {
+            result: PdfProcessResult {
+                pdf_type,
+                markdown: None,
+                page_count,
+                processing_time_ms: start.elapsed_ms(),
+                pages_needing_ocr,
+                ocr_reasons_by_page: page_ocr_reasons_vec(detection_ocr_reasons),
+                title,
+                confidence,
+                layout: LayoutComplexity::default(),
+                has_encoding_issues: false,
+            },
+            text_items: Vec::new(),
         });
     }
 
     // Scanned / ImageBased → nothing to extract
     if matches!(pdf_type, PdfType::Scanned | PdfType::ImageBased) {
-        return Ok(PdfProcessResult {
-            pdf_type,
-            markdown: None,
-            page_count,
-            processing_time_ms: start.elapsed_ms(),
-            pages_needing_ocr,
-            ocr_reasons_by_page: page_ocr_reasons_vec(detection_ocr_reasons),
-            title,
-            confidence,
-            layout: LayoutComplexity::default(),
-            has_encoding_issues: false,
+        return Ok(PdfConversionIntake {
+            result: PdfProcessResult {
+                pdf_type,
+                markdown: None,
+                page_count,
+                processing_time_ms: start.elapsed_ms(),
+                pages_needing_ocr,
+                ocr_reasons_by_page: page_ocr_reasons_vec(detection_ocr_reasons),
+                title,
+                confidence,
+                layout: LayoutComplexity::default(),
+                has_encoding_issues: false,
+            },
+            text_items: Vec::new(),
         });
     }
 
@@ -3712,6 +3760,7 @@ fn process_document(
         })
         .unwrap_or((None, Vec::new()));
 
+    let final_items: Vec<TextItem>;
     let (
         markdown,
         layout,
@@ -3814,6 +3863,11 @@ fn process_document(
                 options.page_filter.as_ref(),
             );
 
+            // The items used to build Markdown — surface these (not the
+            // unfiltered set) so the conversion intake stays consistent with
+            // the generated Markdown.
+            final_items = items.clone();
+
             let text_quality = analyze_text_quality(&items);
             merge_ocr_reasons(&mut ocr_reasons_by_page, text_quality.reasons_by_page);
             let layout = compute_layout_complexity(&items, &layout_items, &rects, &lines);
@@ -3849,14 +3903,17 @@ fn process_document(
                 ocr_reasons_by_page,
             )
         }
-        None => (
-            None,
-            LayoutComplexity::default(),
-            false,
-            std::collections::HashSet::new(),
-            Vec::new(),
-            BTreeMap::new(),
-        ),
+        None => {
+            final_items = Vec::new();
+            (
+                None,
+                LayoutComplexity::default(),
+                false,
+                std::collections::HashSet::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+        }
     };
 
     // If the extracted text is predominantly garbage (non-alphanumeric) and
@@ -3942,23 +3999,32 @@ fn process_document(
         markdown
     };
 
-    Ok(PdfProcessResult {
-        pdf_type,
-        markdown,
-        page_count,
-        processing_time_ms: start.elapsed_ms(),
-        pages_needing_ocr,
-        ocr_reasons_by_page: {
-            // Detector reasons (scanned / no_text / vector_text / garbled) merged
-            // with the markdown-stage garbled detection, deduped per page.
-            let mut merged = detection_ocr_reasons;
-            merge_ocr_reasons(&mut merged, text_quality_reasons_by_page);
-            page_ocr_reasons_vec(merged)
+    let text_items = if markdown.is_some() {
+        final_items
+    } else {
+        Vec::new()
+    };
+
+    Ok(PdfConversionIntake {
+        result: PdfProcessResult {
+            pdf_type,
+            markdown,
+            page_count,
+            processing_time_ms: start.elapsed_ms(),
+            pages_needing_ocr,
+            ocr_reasons_by_page: {
+                // Detector reasons (scanned / no_text / vector_text / garbled) merged
+                // with the markdown-stage garbled detection, deduped per page.
+                let mut merged = detection_ocr_reasons;
+                merge_ocr_reasons(&mut merged, text_quality_reasons_by_page);
+                page_ocr_reasons_vec(merged)
+            },
+            title,
+            confidence,
+            layout,
+            has_encoding_issues,
         },
-        title,
-        confidence,
-        layout,
-        has_encoding_issues,
+        text_items,
     })
 }
 

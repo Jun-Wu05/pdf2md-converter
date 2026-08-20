@@ -1,12 +1,9 @@
 """Issue #3 — structured extraction intake slice.
 
-Seam: ``convert_pdf_to_markdown`` internal intake source — switches from
-calling only ``process_pdf`` to also capturing structured ``TextItem`` data
-via ``extract_text_with_positions``, threaded through an internal
-``_Extraction`` pipeline object for downstream slices (#4+).
-
-Body Markdown stays sourced from ``process_pdf`` in this slice (see core.py
-module docstring for why a naive Python rebuild would absorb #4's work).
+Seam: ``convert_pdf_to_markdown`` consumes a single combined intake that
+returns body Markdown plus structured ``TextItem`` data from one PDF parse,
+threaded through an internal ``_Extraction`` pipeline object for downstream
+slices (#4+).
 
 Tests verify external behaviour only. Each acceptance criterion maps to one
 RED→GREEN cycle.
@@ -23,6 +20,12 @@ covered by the vendor regression test below (one extra vendor tolerated).
 AC3 (each TextItem has x/y/font/font_size/page) — covered here.
 """
 import pdf_inspector
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(pdf_inspector, "process_pdf_with_positions"),
+    reason="requires a rebuilt pdf_inspector extension",
+)
 
 from pdf2md_full import convert_pdf_to_markdown, convert_pdf_to_markdown_bytes
 from pdf2md_full.core import _convert
@@ -31,19 +34,46 @@ from pdf2md_full.core import _convert
 # --- AC1: structured TextItems captured into the internal pipeline --------
 
 def test_internal_extraction_holds_text_items(sample_pdf):
-    """``_convert`` populates ``text_items`` from extract_text_with_positions."""
+    """``_convert`` populates ``text_items`` from the combined intake."""
     extraction = _convert(sample_pdf)
     assert extraction.text_items, "structured intake produced no TextItems"
     assert extraction.markdown, "body markdown should be non-empty for sample"
 
 
-def test_internal_extraction_text_items_match_direct_call(sample_pdf):
-    """The pipeline's items are exactly what extract_text_with_positions returns."""
-    direct = pdf_inspector.extract_text_with_positions(sample_pdf)
+def test_internal_extraction_text_items_match_combined_intake(sample_pdf):
+    """The pipeline consumes the single combined conversion intake."""
+    direct = pdf_inspector.process_pdf_with_positions(sample_pdf)
     extraction = _convert(sample_pdf)
-    assert len(extraction.text_items) == len(direct)
-    assert extraction.text_items[0].text == direct[0].text
-    assert extraction.text_items[0].x == direct[0].x
+    assert len(extraction.text_items) == len(direct.text_items)
+    assert extraction.text_items[0].text == direct.text_items[0].text
+    assert extraction.text_items[0].x == direct.text_items[0].x
+
+
+def test_convert_uses_single_combined_intake(monkeypatch, sample_pdf):
+    """The internal pipeline does not fall back to either legacy binding."""
+
+    class Result:
+        markdown = "single parse body"
+
+    class Intake:
+        result = Result()
+        text_items = []
+
+    monkeypatch.setattr(pdf_inspector, "process_pdf_with_positions", lambda _: Intake())
+    monkeypatch.setattr(
+        pdf_inspector,
+        "process_pdf",
+        lambda *_: (_ for _ in ()).throw(AssertionError("legacy process_pdf called")),
+    )
+    monkeypatch.setattr(
+        pdf_inspector,
+        "extract_text_with_positions",
+        lambda *_: (_ for _ in ()).throw(AssertionError("legacy positions called")),
+    )
+
+    extraction = _convert(sample_pdf)
+    assert extraction.markdown == "single parse body"
+    assert extraction.text_items == []
 
 
 def test_convert_pdf_to_markdown_returns_str(sample_pdf):

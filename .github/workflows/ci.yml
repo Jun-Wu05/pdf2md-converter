@@ -90,6 +90,82 @@ jobs:
       - name: Build
         run: cargo build --release --verbose
 
+  wheel-smoke:
+    name: Wheel smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: wheel-smoke
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          args: --release --out dist
+          manylinux: auto
+
+      - name: Install wheel in a clean environment
+        run: |
+          python -m venv /tmp/pdf-inspector-wheel-smoke
+          /tmp/pdf-inspector-wheel-smoke/bin/pip install --no-index --find-links "$GITHUB_WORKSPACE/dist" pdf-inspector
+
+      - name: Smoke test installed module — manifest + intake binding
+        run: |
+          /tmp/pdf-inspector-wheel-smoke/bin/python - <<'PY'
+          import os
+          import pdf_inspector
+          fixture = os.path.join(os.environ["GITHUB_WORKSPACE"], "tests/fixtures/thermo-freon12.pdf")
+          # New-style combined conversion intake must be present on the installed wheel.
+          assert hasattr(pdf_inspector, "process_pdf_with_positions"), "intake binding missing"
+          intake = pdf_inspector.process_pdf_with_positions(fixture)
+          assert intake.result.markdown, "intake produced no markdown"
+          assert intake.text_items, "intake produced no positioned text items"
+          item = intake.text_items[0]
+          for attr in ("text", "x", "y", "font", "font_size", "page"):
+              assert hasattr(item, attr), f"TextItem missing {attr}"
+          print("intake ok:", len(intake.text_items), "items")
+          PY
+
+      - name: Smoke test installed module — path/bytes equivalence
+        run: |
+          /tmp/pdf-inspector-wheel-smoke/bin/python - <<'PY'
+          import os
+          import pathlib
+          import pdf_inspector
+          fixture = os.path.join(os.environ["GITHUB_WORKSPACE"], "tests/fixtures/thermo-freon12.pdf")
+          data = pathlib.Path(fixture).read_bytes()
+          from_file = pdf_inspector.process_pdf_with_positions(fixture)
+          from_bytes = pdf_inspector.process_pdf_with_positions_bytes(data)
+          assert from_bytes.result.markdown == from_file.result.markdown
+          assert from_bytes.text_items and from_file.text_items
+          print("path/bytes ok:", len(from_bytes.text_items), "items")
+          PY
+
+      - name: Smoke test installed CLI — stdout, file output, missing-input error
+        run: |
+          mkdir -p /tmp/pdf-inspector-wheel-smoke-run
+          cd /tmp/pdf-inspector-wheel-smoke-run
+          /tmp/pdf-inspector-wheel-smoke/bin/pdf2md-full "$GITHUB_WORKSPACE/tests/fixtures/nexo-price-en.pdf" -o output.md
+          test -s output.md
+          if /tmp/pdf-inspector-wheel-smoke/bin/pdf2md-full missing.pdf >stdout.txt 2>stderr.txt; then
+            echo "missing input unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep -F "pdf2md-full:" stderr.txt
+
   wasm:
     name: WebAssembly
     runs-on: ubuntu-latest

@@ -34,19 +34,19 @@ from pdf2md_full.core import _convert
 # --- AC1: structured TextItems captured into the internal pipeline --------
 
 def test_internal_extraction_holds_text_items(sample_pdf):
-    """``_convert`` populates ``text_items`` from the combined intake."""
-    extraction = _convert(sample_pdf)
-    assert extraction.text_items, "structured intake produced no TextItems"
-    assert extraction.markdown, "body markdown should be non-empty for sample"
+    """``_convert`` returns ``(markdown, text_items)`` from the combined intake."""
+    markdown, text_items = _convert(sample_pdf)
+    assert text_items, "structured intake produced no TextItems"
+    assert markdown, "body markdown should be non-empty for sample"
 
 
 def test_internal_extraction_text_items_match_combined_intake(sample_pdf):
     """The pipeline consumes the single combined conversion intake."""
     direct = pdf_inspector.process_pdf_with_positions(sample_pdf)
-    extraction = _convert(sample_pdf)
-    assert len(extraction.text_items) == len(direct.text_items)
-    assert extraction.text_items[0].text == direct.text_items[0].text
-    assert extraction.text_items[0].x == direct.text_items[0].x
+    _, text_items = _convert(sample_pdf)
+    assert len(text_items) == len(direct.text_items)
+    assert text_items[0].text == direct.text_items[0].text
+    assert text_items[0].x == direct.text_items[0].x
 
 
 def test_convert_uses_single_combined_intake(monkeypatch, sample_pdf):
@@ -71,9 +71,9 @@ def test_convert_uses_single_combined_intake(monkeypatch, sample_pdf):
         lambda *_: (_ for _ in ()).throw(AssertionError("legacy positions called")),
     )
 
-    extraction = _convert(sample_pdf)
-    assert extraction.markdown == "single parse body"
-    assert extraction.text_items == []
+    markdown, text_items = _convert(sample_pdf)
+    assert markdown == "single parse body"
+    assert text_items == []
 
 
 def test_convert_pdf_to_markdown_returns_str(sample_pdf):
@@ -101,8 +101,8 @@ def test_text_items_carry_required_fields(sample_pdf):
 
 
 def test_internal_extraction_items_carry_required_fields(sample_pdf):
-    extraction = _convert(sample_pdf)
-    for it in extraction.text_items:
+    _, text_items = _convert(sample_pdf)
+    for it in text_items:
         for name in _REQUIRED_FIELDS:
             assert hasattr(it, name), f"pipeline TextItem missing field {name}"
 

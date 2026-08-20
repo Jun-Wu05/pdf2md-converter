@@ -122,9 +122,41 @@ jobs:
           python -m venv /tmp/pdf-inspector-wheel-smoke
           /tmp/pdf-inspector-wheel-smoke/bin/pip install --no-index --find-links "$GITHUB_WORKSPACE/dist" pdf-inspector
 
-      - name: Smoke test installed command
+      - name: Smoke test installed module — manifest + intake binding
         run: |
-          mkdir /tmp/pdf-inspector-wheel-smoke-run
+          python - <<'PY'
+          import os
+          import pdf_inspector
+          fixture = os.path.join(os.environ["GITHUB_WORKSPACE"], "tests/fixtures/thermo-freon12.pdf")
+          # New-style combined conversion intake must be present on the installed wheel.
+          assert hasattr(pdf_inspector, "process_pdf_with_positions"), "intake binding missing"
+          intake = pdf_inspector.process_pdf_with_positions(fixture)
+          assert intake.result.markdown, "intake produced no markdown"
+          assert intake.text_items, "intake produced no positioned text items"
+          item = intake.text_items[0]
+          for attr in ("text", "x", "y", "font", "font_size", "page"):
+              assert hasattr(item, attr), f"TextItem missing {attr}"
+          print("intake ok:", len(intake.text_items), "items")
+          PY
+
+      - name: Smoke test installed module — path/bytes equivalence
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import pdf_inspector
+          fixture = os.path.join(os.environ["GITHUB_WORKSPACE"], "tests/fixtures/thermo-freon12.pdf")
+          data = pathlib.Path(fixture).read_bytes()
+          from_file = pdf_inspector.process_pdf_with_positions(fixture)
+          from_bytes = pdf_inspector.process_pdf_with_positions_bytes(data)
+          assert from_bytes.result.markdown == from_file.result.markdown
+          assert from_bytes.text_items and from_file.text_items
+          print("path/bytes ok:", len(from_bytes.text_items), "items")
+          PY
+
+      - name: Smoke test installed CLI — stdout, file output, missing-input error
+        run: |
+          mkdir -p /tmp/pdf-inspector-wheel-smoke-run
           cd /tmp/pdf-inspector-wheel-smoke-run
           /tmp/pdf-inspector-wheel-smoke/bin/pdf2md-full "$GITHUB_WORKSPACE/tests/fixtures/nexo-price-en.pdf" -o output.md
           test -s output.md

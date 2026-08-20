@@ -63,6 +63,30 @@ impl PyPdfResult {
     }
 }
 
+/// Result of a conversion intake: processed-PDF result plus positioned text
+/// items consistent with the generated Markdown.
+#[pyclass(name = "PdfIntake")]
+#[derive(Clone)]
+pub struct PyPdfIntake {
+    /// The standard processed-PDF result (metadata + Markdown).
+    #[pyo3(get)]
+    pub result: PyPdfResult,
+    /// Positioned text items consistent with the generated Markdown.
+    #[pyo3(get)]
+    pub text_items: Vec<PyTextItem>,
+}
+
+#[pymethods]
+impl PyPdfIntake {
+    fn __repr__(&self) -> String {
+        format!(
+            "PdfIntake(result={:?}, text_items={})",
+            self.result.pdf_type,
+            self.text_items.len()
+        )
+    }
+}
+
 /// OCR reasons for a single 1-indexed page.
 #[pyclass(name = "PageOcrReasons")]
 #[derive(Clone)]
@@ -316,6 +340,13 @@ fn to_py_result(r: crate::PdfProcessResult) -> PyPdfResult {
     }
 }
 
+fn to_py_intake(intake: crate::PdfConversionIntake) -> PyPdfIntake {
+    PyPdfIntake {
+        result: to_py_result(intake.result),
+        text_items: convert_text_items(intake.text_items),
+    }
+}
+
 fn to_py_page_ocr_reasons(reasons: Vec<crate::PageOcrReasons>) -> Vec<PyPageOcrReasons> {
     reasons
         .into_iter()
@@ -456,6 +487,32 @@ fn process_pdf_bytes(data: &[u8], pages: Option<Vec<u32>>) -> PyResult<PyPdfResu
     }
     let result = crate::process_pdf_mem_with_options(data, opts).map_err(to_py_err)?;
     Ok(to_py_result(result))
+}
+
+/// Process a PDF file into Markdown plus Markdown-consistent positioned text
+/// items from a single loaded document.
+#[pyfunction]
+#[pyo3(signature = (path, pages=None))]
+fn process_pdf_with_positions(path: &str, pages: Option<Vec<u32>>) -> PyResult<PyPdfIntake> {
+    let mut opts = crate::PdfOptions::new();
+    if let Some(p) = pages {
+        opts = opts.pages(p);
+    }
+    let intake = crate::process_pdf_with_positions(path, opts).map_err(to_py_err)?;
+    Ok(to_py_intake(intake))
+}
+
+/// Process a PDF from bytes into Markdown plus Markdown-consistent positioned
+/// text items from a single loaded document.
+#[pyfunction]
+#[pyo3(signature = (data, pages=None))]
+fn process_pdf_with_positions_bytes(data: &[u8], pages: Option<Vec<u32>>) -> PyResult<PyPdfIntake> {
+    let mut opts = crate::PdfOptions::new();
+    if let Some(p) = pages {
+        opts = opts.pages(p);
+    }
+    let intake = crate::process_pdf_with_positions_mem(data, opts).map_err(to_py_err)?;
+    Ok(to_py_intake(intake))
 }
 
 /// Fast detection only — no text extraction or markdown.
@@ -617,6 +674,7 @@ fn extract_pages_markdown_bytes(
 #[pymodule]
 fn pdf_inspector(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPdfResult>()?;
+    m.add_class::<PyPdfIntake>()?;
     m.add_class::<PyPageOcrReasons>()?;
     m.add_class::<PyPdfClassification>()?;
     m.add_class::<PyTextItem>()?;
@@ -626,6 +684,8 @@ fn pdf_inspector(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPagesExtractionResult>()?;
     m.add_function(wrap_pyfunction!(process_pdf, m)?)?;
     m.add_function(wrap_pyfunction!(process_pdf_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(process_pdf_with_positions, m)?)?;
+    m.add_function(wrap_pyfunction!(process_pdf_with_positions_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(detect_pdf, m)?)?;
     m.add_function(wrap_pyfunction!(detect_pdf_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(classify_pdf, m)?)?;

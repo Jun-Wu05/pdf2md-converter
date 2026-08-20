@@ -5,10 +5,11 @@ Issues #4 + #6 — wireframe-free field-table reconstruction, incl. multi-row
 
 ``convert_pdf_to_markdown`` returns the pdf-inspector body Markdown **plus** a
 ``## 表格还原`` section: rebuilt Markdown tables derived from the structured
-``TextItem`` coordinates (see :mod:`pdf2md_full.tables`). The body itself is
-still sourced from ``pdf_inspector.process_pdf`` — these slices only *append*
-rebuilt tables, they do not rewrite the body, so the 98% text-completeness
-contract inherited from #2 is preserved.
+``TextItem`` coordinates (see :mod:`pdf2md_full.tables`). Markdown and
+coordinates arrive together from ``pdf_inspector.process_pdf_with_positions``
+after one PDF parse; these slices only *append* rebuilt tables, they do not
+rewrite the body, so the 98% text-completeness contract inherited from #2 is
+preserved.
 
 The public entry signature and the text-completeness guarantee are the public
 contract; downstream slices swap the body source and insert table-restoration
@@ -68,20 +69,24 @@ def convert_pdf_to_markdown_bytes(data: bytes) -> str:
 
 def _extract_text_items(pdf_path: str) -> list[Any]:
     """Structured intake: ``TextItem`` list with x/y/font/font_size/page."""
-    return pdf_inspector.extract_text_with_positions(pdf_path)
+    return pdf_inspector.process_pdf_with_positions(pdf_path).text_items
 
 
 def _convert(pdf_path: str) -> _Extraction:
     _validate_path(pdf_path)
-    text_items = _extract_text_items(pdf_path)
-    markdown = pdf_inspector.process_pdf(pdf_path).markdown or ""
-    return _Extraction(markdown=markdown, text_items=text_items)
+    intake = pdf_inspector.process_pdf_with_positions(pdf_path)
+    return _Extraction(
+        markdown=intake.result.markdown or "",
+        text_items=intake.text_items,
+    )
 
 
 def _convert_bytes(data: bytes) -> _Extraction:
-    text_items = pdf_inspector.extract_text_with_positions_bytes(data)
-    markdown = pdf_inspector.process_pdf_bytes(data).markdown or ""
-    return _Extraction(markdown=markdown, text_items=text_items)
+    intake = pdf_inspector.process_pdf_with_positions_bytes(data)
+    return _Extraction(
+        markdown=intake.result.markdown or "",
+        text_items=intake.text_items,
+    )
 
 
 def _assemble(extraction: _Extraction) -> str:

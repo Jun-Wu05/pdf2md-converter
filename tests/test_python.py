@@ -204,9 +204,48 @@ class TestExtractTextWithPositions:
         assert all(item.page == 1 for item in items)
 
 
+
 # ---------------------------------------------------------------------------
-# extract_text_in_regions / extract_text_in_regions_bytes
+# Combined conversion intake
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not hasattr(pdf_inspector, "process_pdf_with_positions"),
+    reason="requires a rebuilt pdf_inspector extension",
+)
+class TestProcessPdfWithPositions:
+    def test_file_returns_markdown_and_positioned_items(self):
+        intake = pdf_inspector.process_pdf_with_positions(
+            fixture_path("thermo-freon12.pdf")
+        )
+        assert intake.result.markdown
+        assert intake.text_items
+        item = intake.text_items[0]
+        assert isinstance(item.text, str)
+        assert isinstance(item.x, float)
+        assert isinstance(item.y, float)
+        assert isinstance(item.font, str)
+        assert isinstance(item.font_size, float)
+        assert isinstance(item.page, int)
+
+    def test_bytes_matches_file_markdown(self):
+        data = fixture_bytes("thermo-freon12.pdf")
+        from_file = pdf_inspector.process_pdf_with_positions(
+            fixture_path("thermo-freon12.pdf")
+        )
+        from_bytes = pdf_inspector.process_pdf_with_positions_bytes(data)
+        assert from_bytes.result.markdown == from_file.result.markdown
+        assert from_bytes.text_items
+
+    def test_pages_filter(self):
+        intake = pdf_inspector.process_pdf_with_positions(
+            fixture_path("thermo-freon12.pdf"), pages=[1]
+        )
+        assert intake.text_items
+        assert all(item.page == 1 for item in intake.text_items)
+
+
 
 
 class TestExtractTextInRegions:

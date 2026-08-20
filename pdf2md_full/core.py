@@ -62,15 +62,6 @@ def convert_pdf_to_markdown_bytes(data: bytes) -> str:
 
 # --- Internal pipeline ---------------------------------------------------
 
-# Structured-intake seam: downstream slices (#5+) import this to obtain the
-# TextItem list without re-running extraction. Named with a leading underscore
-# because it is an internal seam, not part of the public API.
-
-
-def _extract_text_items(pdf_path: str) -> list[Any]:
-    """Structured intake: ``TextItem`` list with x/y/font/font_size/page."""
-    return pdf_inspector.process_pdf_with_positions(pdf_path).text_items
-
 
 def _convert(pdf_path: str) -> _Extraction:
     _validate_path(pdf_path)

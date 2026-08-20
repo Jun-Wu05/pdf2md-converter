@@ -124,7 +124,7 @@ jobs:
 
       - name: Smoke test installed module — manifest + intake binding
         run: |
-          python - <<'PY'
+          /tmp/pdf-inspector-wheel-smoke/bin/python - <<'PY'
           import os
           import pdf_inspector
           fixture = os.path.join(os.environ["GITHUB_WORKSPACE"], "tests/fixtures/thermo-freon12.pdf")
@@ -141,7 +141,7 @@ jobs:
 
       - name: Smoke test installed module — path/bytes equivalence
         run: |
-          python - <<'PY'
+          /tmp/pdf-inspector-wheel-smoke/bin/python - <<'PY'
           import os
           import pathlib
           import pdf_inspector

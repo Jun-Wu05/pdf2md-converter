@@ -228,7 +228,7 @@ def _infer_column_count(data_rows: list[list[Any]]) -> int:
     the mode is taken over rows with ≥2 items; ties round up to favour the
     wider table (avoids collapsing a 5-column table to the 2-item wrap row).
     """
-    counts = _data_row_item_counts(data_rows)
+    counts = [len(r) for r in data_rows if len(r) >= 2]
     if not counts:
         return 0
     from collections import Counter
@@ -237,11 +237,6 @@ def _infer_column_count(data_rows: list[list[Any]]) -> int:
     best = max(freq.values())
     candidates = sorted(c for c, n in freq.items() if n == best)
     return candidates[-1]
-
-
-def _data_row_item_counts(data_rows: list[list[Any]]) -> list[int]:
-    """Item counts for rows that can carry at least two table columns."""
-    return [len(r) for r in data_rows if len(r) >= 2]
 
 
 def _needs_degraded_representation(table: list[list[Any]]) -> bool:
@@ -255,7 +250,7 @@ def _needs_degraded_representation(table: list[list[Any]]) -> bool:
     column-first layouts.
     """
     data_rows = table[1:]
-    counts = _data_row_item_counts(data_rows)
+    counts = [len(r) for r in data_rows if len(r) >= 2]
     if len(counts) < 2:
         return True
 

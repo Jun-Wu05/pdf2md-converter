@@ -29,7 +29,6 @@ pages merged by #7. When the single-row path has no unique modal column count,
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,9 +39,6 @@ _GAP_THRESHOLD = 40.0
 # column. Column centres are derived from the data-item x histogram, so this
 # only needs to absorb per-item x jitter, not separate columns.
 _X_COL_TOL = 18.0
-
-# A markdown table separator cell (``---`` / ``:--:``).
-_SEP_CELL = re.compile(r"^:?-+:?$")
 
 
 # --- physical-row clustering (#4) ------------------------------------------
@@ -547,32 +543,20 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
             if _is_vertical_table(rows, i):
                 hr, hc, dr, k, hx, nxt = _column_first_table(rows, i)
                 if dr:
-                    built.append(
-                        _BuiltTable(
-                            _render_table_markdown(hr, dr, k),
-                            hc,
-                            hx,
-                            rows[i][0],
-                        )
-                    )
+                    built.append(_BuiltTable(hr, hc, dr, k, hx, rows[i][0]))
                 i = max(nxt, i + 1)
             else:
                 table, nxt = _collect_table_rows(rows, i)
                 if _needs_degraded_representation(table):
                     md = _render_degraded_definition_list(table)
                     if md:
-                        built.append(_BuiltTable(md, [], [], rows[i][0]))
+                        built.append(
+                            _BuiltTable([], [], [], 0, [], rows[i][0], pre_rendered=md)
+                        )
                 else:
                     hr, hc, dr, k, hx = _render_table(table)
                     if dr:
-                        built.append(
-                            _BuiltTable(
-                                _render_table_markdown(hr, dr, k),
-                                hc,
-                                hx,
-                                rows[i][0],
-                            )
-                        )
+                        built.append(_BuiltTable(hr, hc, dr, k, hx, rows[i][0]))
                 i = max(nxt, i + 1)
         else:
             i += 1
@@ -581,19 +565,30 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
 
 @dataclass
 class _BuiltTable:
-    """One rebuilt field table plus the metadata #7 needs to merge it.
+    """One rebuilt field table, carried structurally for #7 to merge.
 
-    ``markdown`` is the rendered table. ``header_cells`` is the normalised
-    header (the continuation match key) carried structurally so #7 compares
-    headers without re-parsing the rendered string. ``header_xs`` is the
-    per-column x grid; ``page`` the page it starts on. Degraded definition-list
-    tables carry no grid.
+    ``header_cells`` is the normalised header (the continuation match key),
+    ``data_rows`` the structured cell rows, ``ncols`` the column count, and
+    ``header_xs`` the per-column x grid — all carried so cross-page
+    continuation compares and joins cells directly instead of re-parsing a
+    rendered string. ``page`` is the page the table starts on. Degraded
+    definition-list tables carry no grid and are ``pre_rendered`` (they cannot
+    be merged into a continuation).
     """
 
-    markdown: str
+    header_render: list[str]
     header_cells: list[str]
+    data_rows: list[list[str]]
+    ncols: int
     header_xs: list[float]
     page: int
+    pre_rendered: str | None = None
+
+    def render(self) -> str:
+        """Render the model to ``| ... |`` Markdown (degraded: passthrough)."""
+        if self.pre_rendered is not None:
+            return self.pre_rendered
+        return _render_table_markdown(self.header_render, self.data_rows, self.ncols)
 
 
 def _render_table_markdown(
@@ -618,54 +613,26 @@ def _merge_continuations(built: list[_BuiltTable]) -> list[str]:
     """Fold cross-page continuation tables into their predecessor.
 
     A table is a continuation of the previous one when (a) it starts on a
-    later page, (b) its header tokens equal the previous table's, and (c)
-    its header column x-grid matches column-for-column within ``_GRID_TOL``.
-    Condition (c) is the guardrail that keeps an independent table which
-    merely re-uses the same header words at a different indent from being
-    folded in. The continuation's data rows are appended after the previous
-    table's last data row; its header and ``|---|`` separator are dropped.
+    later page, (b) its normalised header cells equal the previous table's,
+    and (c) its header column x-grid matches column-for-column within
+    ``_GRID_TOL``. Condition (c) is the guardrail that keeps an independent
+    table which merely re-uses the same header words at a different indent
+    from being folded in. The continuation's data rows are appended after the
+    previous table's last data row; its header and ``|---|`` separator are
+    dropped. All comparison and joining happens on the structured model;
+    rendering occurs once at the end.
     """
     if not built:
         return []
-    out: list[str] = [built[0].markdown]
+    out: list[_BuiltTable] = [built[0]]
     last = built[0]
     for t in built[1:]:
         if t.page > last.page and _is_continuation(t, last):
-            out[-1] = _append_continuation(out[-1], t.markdown)
-            last = _BuiltTable(out[-1], last.header_cells, last.header_xs, t.page)
+            last.data_rows.extend(t.data_rows)
         else:
-            out.append(t.markdown)
+            out.append(t)
             last = t
-    return out
-
-
-def _header_tokens(md: str) -> list[str]:
-    """The first non-separator table row of ``md`` as a list of cell texts."""
-    for line in md.splitlines():
-        s = line.strip()
-        if s.startswith("|") and s.endswith("|") and len(s) >= 3:
-            cells = [c.strip() for c in s[1:-1].split("|")]
-            if not all(_SEP_CELL.match(c) for c in cells if c):
-                return cells
-    return []
-
-
-def _data_block(md: str) -> str:
-    """All table rows of ``md`` after the header + separator (the data rows)."""
-    lines = md.splitlines()
-    body: list[str] = []
-    seen_sep = False
-    for line in lines:
-        s = line.strip()
-        if not (s.startswith("|") and s.endswith("|") and len(s) >= 3):
-            continue
-        cells = [c.strip() for c in s[1:-1].split("|")]
-        if not seen_sep:
-            if all(_SEP_CELL.match(c) for c in cells if c):
-                seen_sep = True
-            continue
-        body.append(s)
-    return "\n".join(body)
+    return [t.render() for t in out]
 
 
 def _is_continuation(cur: _BuiltTable, prev: _BuiltTable) -> bool:
@@ -699,14 +666,6 @@ def _header_cells(raw_header: list[str]) -> list[str]:
     while cells and not cells[-1]:
         cells.pop()
     return cells
-
-
-def _append_continuation(prev_md: str, cont_md: str) -> str:
-    """Append ``cont_md``'s data rows to ``prev_md``, dropping the cont. header."""
-    body = _data_block(cont_md)
-    if not body:
-        return prev_md
-    return prev_md + "\n" + body
 
 
 def _is_vertical_table(

@@ -140,10 +140,6 @@ def _nearest_column(x: float, centres: list[float], tol: float = _X_COL_TOL) -> 
     return best
 
 
-def _assign_column_centres(x: float, centres: list[float]) -> int:
-    return _nearest_column(x, centres)
-
-
 # --- table extraction (#4 path: single-row header) ------------------------
 
 
@@ -400,7 +396,7 @@ def _row_cells_column_first(
         [it for r in rows for it in r], key=lambda i: (i.x, -i.y)
     )
     for it in items:
-        c = _assign_column_centres(it.x, centres)
+        c = _nearest_column(it.x, centres)
         if c >= k:
             c = k - 1
         cells[c] = (cells[c] + it.text) if cells[c] else it.text
@@ -419,7 +415,7 @@ def _header_cells_column_first(
     for r in rows:
         cells = [""] * k
         for it in sorted(r, key=lambda i: (i.x, -i.y)):
-            c = _assign_column_centres(it.x, centres)
+            c = _nearest_column(it.x, centres)
             if c >= k:
                 c = k - 1
             cells[c] = (cells[c] + it.text) if cells[c] else it.text
@@ -441,7 +437,7 @@ def _rows_column_first(
     col_items: list[list[Any]] = [[] for _ in range(k)]
     for r in data_rows:
         for it in r:
-            c = _assign_column_centres(it.x, centres)
+            c = _nearest_column(it.x, centres)
             if c >= k:
                 c = k - 1
             col_items[c].append(it)

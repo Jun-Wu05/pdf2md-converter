@@ -182,25 +182,28 @@ def _collect_table_rows(
     return table, j
 
 
-def _render_table(table: list[list[Any]]) -> tuple[str, list[float]]:
-    """Render a single-row-header table; return (markdown, header x-fingerprint).
+def _render_table(
+    table: list[list[Any]],
+) -> tuple[list[str], list[str], list[list[str]], int, list[float]]:
+    """Build a structured single-row-header table.
 
-    The x-fingerprint is the sorted list of header items' x coordinates — the
-    per-column grid used by #7 to decide whether the next page's table is a
-    continuation (same header text AND same column grid) or an independent
-    table that just re-uses the same header words at a different x.
+    Returns ``(header_render, header_cells, data_rows, ncols, header_xs)``:
+    the header row as rendered cells, the normalised header (continuation
+    match key), the data rows as cell rows, the column count, and the sorted
+    per-column x grid used by #7 to decide continuation (same header AND same
+    column grid) vs an independent table.
     """
     header = table[0]
-    data_rows = table[1:]
-    if not data_rows:
-        return "", []
+    data_rows_raw = table[1:]
+    if not data_rows_raw:
+        return [], [], [], 0, []
     # Column count comes from the DATA rows' x spread, not the header item
     # count: vertical-per-char headers (#6) and right-aligned headers (#4)
     # would otherwise force the wrong column count.
-    k = _infer_column_count(data_rows)
+    k = _infer_column_count(data_rows_raw)
     if k < 2:
         k = max(2, len(header))
-    data_xs = [it.x for r in data_rows for it in r]
+    data_xs = [it.x for r in data_rows_raw for it in r]
     boundaries = _column_boundaries(data_xs, k)
 
     def to_cells(r: list[Any]) -> list[str]:
@@ -212,13 +215,10 @@ def _render_table(table: list[list[Any]]) -> tuple[str, list[float]]:
             cells[c] = (cells[c] + " " + it.text).strip() if cells[c] else it.text
         return cells
 
-    lines = []
-    lines.append("| " + " | ".join(it.text for it in header) + " |")
-    lines.append("|" + "|".join("---" for _ in range(k)) + "|")
-    for r in data_rows:
-        lines.append("| " + " | ".join(to_cells(r)) + " |")
+    header_render = [it.text for it in header]
+    data_rows = [to_cells(r) for r in data_rows_raw]
     header_xs = sorted(it.x for it in header)
-    return "\n".join(lines), header_xs
+    return header_render, _header_cells(header_render), data_rows, k, header_xs
 
 
 # --- column inference ------------------------------------------------------
@@ -300,11 +300,12 @@ def _render_degraded_definition_list(table: list[list[Any]]) -> str:
 
 def _column_first_table(
     rows: list[tuple[int, list[Any]]], start: int
-) -> tuple[str, list[float], int]:
+) -> tuple[list[str], list[str], list[list[str]], int, list[float], int]:
     """Rebuild a vertical-per-char field table starting at ``start``.
 
-    Returns ``(markdown, header_xs, next_index)`` where ``header_xs`` is the
-    sorted column-centre x list used by #7 to match cross-page continuations.
+    Returns ``(header_render, header_cells, data_rows, ncols, header_xs,
+    next_index)`` where ``header_xs`` is the sorted column-centre x list used
+    by #7 to match cross-page continuations.
 
     1. Gather header fragment rows (contiguous physical rows above the first
        data row that carry 字段 / 名称 / 类型 tokens).
@@ -330,7 +331,7 @@ def _column_first_table(
             continue
         break
     if not header_rows:
-        return "", [], j
+        return [], [], [], 0, [], j
     # Data rows.
     data_rows: list[list[Any]] = []
     prev_y = header_rows[-1][0].y
@@ -349,7 +350,7 @@ def _column_first_table(
         prev_y = r[0].y
         j += 1
     if not data_rows:
-        return "", [], j
+        return [], [], [], 0, [], j
 
     all_items = [it for r in header_rows + data_rows for it in r]
     # Column count and centres come from clustering the DATA items' x
@@ -361,20 +362,16 @@ def _column_first_table(
     if k < 2:
         centres = _cluster_x_centres([it.x for it in all_items])
         k = max(2, len(centres))
-    header_cells = _header_cells_column_first(header_rows, centres, k)
+    header_cells_raw = _header_cells_column_first(header_rows, centres, k)
     data_cells = _rows_column_first(data_rows, centres, k)
 
     # Flatten multi-row header fragments into a single header row.
-    header_line = _merge_header(header_cells, k)
+    header_line = _merge_header(header_cells_raw, k)
 
-    lines = ["| " + " | ".join(header_line) + " |"]
-    lines.append("|" + "|".join("---" for _ in range(k)) + "|")
-    for r in data_cells:
-        lines.append("| " + " | ".join(r) + " |")
     # Header x-fingerprint for #7 continuation match: the column centres are
     # the stable grid for vertical-per-char tables (header items span rows).
     header_xs = sorted(centres)
-    return "\n".join(lines), header_xs, j
+    return header_line, _header_cells(header_line), data_cells, k, header_xs, j
 
 
 def _is_header_fragment(row: list[Any], prior: list[list[Any]]) -> bool:
@@ -548,20 +545,34 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
         if _is_field_header(rows[i][1]):
             # Peek: is this a vertical-per-char header (#6) or single-row (#4)?
             if _is_vertical_table(rows, i):
-                md, header_xs, nxt = _column_first_table(rows, i)
-                if md:
-                    built.append(_BuiltTable(md, header_xs, rows[i][0]))
+                hr, hc, dr, k, hx, nxt = _column_first_table(rows, i)
+                if dr:
+                    built.append(
+                        _BuiltTable(
+                            _render_table_markdown(hr, dr, k),
+                            hc,
+                            hx,
+                            rows[i][0],
+                        )
+                    )
                 i = max(nxt, i + 1)
             else:
                 table, nxt = _collect_table_rows(rows, i)
                 if _needs_degraded_representation(table):
                     md = _render_degraded_definition_list(table)
                     if md:
-                        built.append(_BuiltTable(md, [], rows[i][0]))
+                        built.append(_BuiltTable(md, [], [], rows[i][0]))
                 else:
-                    md, header_xs = _render_table(table)
-                    if md:
-                        built.append(_BuiltTable(md, header_xs, rows[i][0]))
+                    hr, hc, dr, k, hx = _render_table(table)
+                    if dr:
+                        built.append(
+                            _BuiltTable(
+                                _render_table_markdown(hr, dr, k),
+                                hc,
+                                hx,
+                                rows[i][0],
+                            )
+                        )
                 i = max(nxt, i + 1)
         else:
             i += 1
@@ -570,11 +581,30 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
 
 @dataclass
 class _BuiltTable:
-    """One rebuilt field table plus the metadata #7 needs to merge it."""
+    """One rebuilt field table plus the metadata #7 needs to merge it.
+
+    ``markdown`` is the rendered table. ``header_cells`` is the normalised
+    header (the continuation match key) carried structurally so #7 compares
+    headers without re-parsing the rendered string. ``header_xs`` is the
+    per-column x grid; ``page`` the page it starts on. Degraded definition-list
+    tables carry no grid.
+    """
 
     markdown: str
-    header_xs: list[float]  # sorted header-column x grid (continuation match key)
+    header_cells: list[str]
+    header_xs: list[float]
     page: int
+
+
+def _render_table_markdown(
+    header_render: list[str], data_rows: list[list[str]], ncols: int
+) -> str:
+    """Render a structured table model to a ``| ... |`` Markdown table."""
+    lines = ["| " + " | ".join(header_render) + " |"]
+    lines.append("|" + "|".join("---" for _ in range(ncols)) + "|")
+    for r in data_rows:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines)
 
 
 # Two header x-grids within this many points, column-for-column, count as the
@@ -602,7 +632,7 @@ def _merge_continuations(built: list[_BuiltTable]) -> list[str]:
     for t in built[1:]:
         if t.page > last.page and _is_continuation(t, last):
             out[-1] = _append_continuation(out[-1], t.markdown)
-            last = _BuiltTable(out[-1], last.header_xs, t.page)
+            last = _BuiltTable(out[-1], last.header_cells, last.header_xs, t.page)
         else:
             out.append(t.markdown)
             last = t
@@ -639,10 +669,8 @@ def _data_block(md: str) -> str:
 
 
 def _is_continuation(cur: _BuiltTable, prev: _BuiltTable) -> bool:
-    """Continuation when header tokens match AND column x-grids match."""
-    if _header_cells(_header_tokens(cur.markdown)) != _header_cells(
-        _header_tokens(prev.markdown)
-    ):
+    """Continuation when header cells match AND column x-grids match."""
+    if cur.header_cells != prev.header_cells:
         return False
     return _grid_matches(cur.header_xs, prev.header_xs)
 

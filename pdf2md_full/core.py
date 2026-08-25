@@ -75,7 +75,7 @@ def _assemble(markdown: str, text_items: list[Any]) -> str:
     tables = rebuild_field_tables(text_items)
     if not tables:
         return body
-    section = "## 表格还原\n\n" + "\n\n".join(tables)
+    section = "## 表格还原\n\n" + "\n\n".join(t.render() for t in tables)
     if not body:
         return section
     if body.endswith("\n"):

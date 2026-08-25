@@ -28,7 +28,7 @@ def test_ambiguous_column_count_degrades_to_definition_list():
         _item("第二行说明", 200, 60),
     ]
 
-    tables = rebuild_field_tables(items)
+    tables = [t.render() for t in rebuild_field_tables(items)]
 
     assert tables == [
         "alpha — 名称: 阿尔法\nbeta — 名称: 贝塔; 说明: 第二行说明"
@@ -53,7 +53,7 @@ def test_stable_column_count_keeps_standard_markdown_table():
         _item("第三行说明", 200, 40),
     ]
 
-    tables = rebuild_field_tables(items)
+    tables = [t.render() for t in rebuild_field_tables(items)]
 
     assert len(tables) == 1
     assert "| 字段 | 名称 | 说明 |" in tables[0]
@@ -74,7 +74,7 @@ def test_degraded_rows_keep_source_order_and_pair_field_with_details():
         _item("计数说明", 200, 60),
     ]
 
-    rendered = rebuild_field_tables(items)[0]
+    rendered = rebuild_field_tables(items)[0].render()
 
     assert rendered.splitlines() == [
         "key — 类型: string",

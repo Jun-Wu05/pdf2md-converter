@@ -501,12 +501,14 @@ def _merge_header(header_cells: list[list[str]], k: int) -> list[str]:
 # --- public seam -----------------------------------------------------------
 
 
-def rebuild_field_tables(text_items: list[Any]) -> list[str]:
-    """Rebuild wireframe-free field tables into Markdown table strings.
+def rebuild_field_tables(text_items: list[Any]) -> list["FieldTable"]:
+    """Rebuild wireframe-free field tables into structured table objects.
 
-    Returns one Markdown table per detected field-table region (header +
-    data), in reading order. Empty list when no field tables are found
-    (e.g. the public nexo fixture has none).
+    Returns one :class:`FieldTable` per detected field-table region (header +
+    data cells), in reading order. Empty list when no field tables are found
+    (e.g. the public nexo fixture has none). Rendering to ``| ... |`` Markdown
+    is the caller's job (:meth:`FieldTable.render`), so callers and tests can
+    read cells directly instead of re-parsing a rendered string.
 
     Single-row-header tables (#4) use the y-clustered path; vertical-per-char
     tables (#6) use the column-first path. The dispatch heuristic checks
@@ -526,7 +528,7 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
     so it cannot be merged into a structured cross-page continuation.
     """
     rows = _cluster_rows(text_items)
-    built: list[_BuiltTable] = []
+    built: list[FieldTable] = []
     i = 0
     while i < len(rows):
         if _is_field_header(rows[i][1]):
@@ -534,7 +536,7 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
             if _is_vertical_table(rows, i):
                 hr, hc, dr, k, hx, nxt = _column_first_table(rows, i)
                 if dr:
-                    built.append(_BuiltTable(hr, hc, dr, k, hx, rows[i][0]))
+                    built.append(FieldTable(hr, hc, dr, k, hx, rows[i][0]))
                 i = max(nxt, i + 1)
             else:
                 table, nxt = _collect_table_rows(rows, i)
@@ -542,12 +544,12 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
                     md = _render_degraded_definition_list(table)
                     if md:
                         built.append(
-                            _BuiltTable([], [], [], 0, [], rows[i][0], pre_rendered=md)
+                            FieldTable([], [], [], 0, [], rows[i][0], pre_rendered=md)
                         )
                 else:
                     hr, hc, dr, k, hx = _render_table(table)
                     if dr:
-                        built.append(_BuiltTable(hr, hc, dr, k, hx, rows[i][0]))
+                        built.append(FieldTable(hr, hc, dr, k, hx, rows[i][0]))
                 i = max(nxt, i + 1)
         else:
             i += 1
@@ -555,7 +557,7 @@ def rebuild_field_tables(text_items: list[Any]) -> list[str]:
 
 
 @dataclass
-class _BuiltTable:
+class FieldTable:
     """One rebuilt field table, carried structurally for #7 to merge.
 
     ``header_cells`` is the normalised header (the continuation match key),
@@ -600,7 +602,7 @@ def _render_table_markdown(
 _GRID_TOL = 12.0
 
 
-def _merge_continuations(built: list[_BuiltTable]) -> list[str]:
+def _merge_continuations(built: list[FieldTable]) -> list[FieldTable]:
     """Fold cross-page continuation tables into their predecessor.
 
     A table is a continuation of the previous one when (a) it starts on a
@@ -610,12 +612,12 @@ def _merge_continuations(built: list[_BuiltTable]) -> list[str]:
     table which merely re-uses the same header words at a different indent
     from being folded in. The continuation's data rows are appended after the
     previous table's last data row; its header and ``|---|`` separator are
-    dropped. All comparison and joining happens on the structured model;
-    rendering occurs once at the end.
+    dropped. All comparison and joining happens on the structured model; the
+    caller renders the surviving tables.
     """
     if not built:
         return []
-    out: list[_BuiltTable] = [built[0]]
+    out: list[FieldTable] = [built[0]]
     last = built[0]
     for t in built[1:]:
         if t.page > last.page and _is_continuation(t, last):
@@ -623,10 +625,10 @@ def _merge_continuations(built: list[_BuiltTable]) -> list[str]:
         else:
             out.append(t)
             last = t
-    return [t.render() for t in out]
+    return out
 
 
-def _is_continuation(cur: _BuiltTable, prev: _BuiltTable) -> bool:
+def _is_continuation(cur: FieldTable, prev: FieldTable) -> bool:
     """Continuation when header cells match AND column x-grids match."""
     if cur.header_cells != prev.header_cells:
         return False

@@ -166,6 +166,43 @@ jobs:
           fi
           grep -F "pdf2md-full:" stderr.txt
 
+  wheel-windows:
+    name: Windows wheel artifact
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: wheel-windows
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          args: --release --out dist
+
+      # The wheel is abi3 (cp38+), so one artifact serves every local CPython
+      # >= 3.8. Uploading it lets the sensitive, gitignored vendor corpus be
+      # regression-tested locally against the exact extension CI built, without
+      # needing a Rust toolchain on the verification machine.
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-windows
+          path: dist/*.whl
+          retention-days: 30
+
   wasm:
     name: WebAssembly
     runs-on: ubuntu-latest
